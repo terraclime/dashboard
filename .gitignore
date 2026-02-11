@@ -1,0 +1,21 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Builds
+build/
+dist/
+coverage/
+
+# Env
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# AWS local tooling
+.aws-sso/cache
+.dynamodb/

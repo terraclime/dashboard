@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: ./services/api
+    container_name: terraclime-api
+    ports:
+      - "8080:8080"
+    environment:
+      - USE_DEMO_DATA=true
+      - API_PORT=8080
+    restart: unless-stopped
+
+  client:
+    build:
+      context: ./client
+    container_name: terraclime-client
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+    restart: unless-stopped

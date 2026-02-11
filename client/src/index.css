@@ -1,0 +1,8 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+.dm-sans{
+    font-family: "Poppins", sans-serif;
+    font-optical-sizing: auto;
+}

@@ -4,8 +4,6 @@ npm-debug.log*
 yarn-error.log*
 
 # Builds
-build/
-dist/
 coverage/
 
 # Env

@@ -1,0 +1,123 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Terraclime profile microservice deployed as a dedicated Lambda.
+
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+  UseDemoData:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+  AwsRegion:
+    Type: String
+    Default: ap-south-1
+  UsersTable:
+    Type: String
+    Default: UserCredentials
+  FlowTable:
+    Type: String
+    Default: flow_data
+  ApartmentTable:
+    Type: String
+    Default: apartment_data
+  BillingTable:
+    Type: String
+    Default: tariff_configs
+  LeaksTable:
+    Type: String
+    Default: leak_data
+  CustomDomainName:
+    Type: String
+    Default: profile.terraclime.com
+    Description: Custom domain name for the profile API.
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: ACM certificate ARN for CustomDomainName.
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 15
+    MemorySize: 256
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        NODE_ENV: production
+        USE_DEMO_DATA: !Ref UseDemoData
+        USERS_TABLE: !Ref UsersTable
+        FLOW_TABLE: !Ref FlowTable
+        APARTMENT_TABLE: !Ref ApartmentTable
+        BILLING_TABLE: !Ref BillingTable
+        LEAKS_TABLE: !Ref LeaksTable
+
+Resources:
+  ProfileApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref StageName
+      Domain:
+        DomainName: !Ref CustomDomainName
+        CertificateArn: !Ref CertificateArn
+        EndpointConfiguration: REGIONAL
+        SecurityPolicy: TLS_1_2
+
+  ProfileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../microservice-runtime/
+      Handler: profile-api/src/index.handler
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:BatchGetItem
+                - dynamodb:GetItem
+                - dynamodb:Query
+                - dynamodb:Scan
+              Resource:
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${UsersTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${UsersTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${FlowTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${FlowTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApartmentTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApartmentTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${BillingTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${BillingTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LeaksTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LeaksTable}/index/*
+      Events:
+        RootRoute:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ProfileApiGateway
+            Path: /
+            Method: ANY
+        ProxyRoute:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ProfileApiGateway
+            Path: /{proxy+}
+            Method: ANY
+
+Outputs:
+  ProfileBaseUrl:
+    Description: Base URL for the deployed profile API stage.
+    Value: !Sub https://${ProfileApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}
+  ProfileCustomBaseUrl:
+    Description: Custom HTTPS base URL for the deployed profile API.
+    Value: !Sub https://${CustomDomainName}
+  ProfileEndpoint:
+    Description: GET endpoint for profile lookup.
+    Value: !Sub https://${ProfileApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/api/profile
+  ProfileCustomEndpoint:
+    Description: Custom HTTPS GET endpoint for profile lookup.
+    Value: !Sub https://${CustomDomainName}/api/profile
+
+

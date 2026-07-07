@@ -1,0 +1,133 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Terraclime profile microservice deployed as a dedicated Lambda.
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+  UseDemoData:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+    - 'true'
+    - 'false'
+  AwsRegion:
+    Type: String
+    Default: ap-south-1
+  UsersTable:
+    Type: String
+    Default: UserCredentials
+  FlowTable:
+    Type: String
+    Default: flow_data
+  ApartmentTable:
+    Type: String
+    Default: apartment_data
+  BillingTable:
+    Type: String
+    Default: billing_cycles
+  LeaksTable:
+    Type: String
+    Default: leak_events
+  CustomDomainName:
+    Type: String
+    Default: profile.terraclime.com
+    Description: Custom domain name for the profile API.
+  CertificateArn:
+    Type: String
+    Default: ''
+    Description: ACM certificate ARN for CustomDomainName.
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 15
+    MemorySize: 256
+    Architectures:
+    - x86_64
+    Environment:
+      Variables:
+        NODE_ENV: production
+        USE_DEMO_DATA:
+          Ref: UseDemoData
+        USERS_TABLE:
+          Ref: UsersTable
+        FLOW_TABLE:
+          Ref: FlowTable
+        APARTMENT_TABLE:
+          Ref: ApartmentTable
+        BILLING_TABLE:
+          Ref: BillingTable
+        LEAKS_TABLE:
+          Ref: LeaksTable
+Resources:
+  ProfileApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName:
+        Ref: StageName
+      Domain:
+        DomainName:
+          Ref: CustomDomainName
+        CertificateArn:
+          Ref: CertificateArn
+        EndpointConfiguration: REGIONAL
+        SecurityPolicy: TLS_1_2
+  ProfileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://terraclime-data-live-artifacts-717279694116-ap-south-1/terraclime-profile/db626b453863595faeebb243192ec0d8
+      Handler: profile-api/src/index.handler
+      Policies:
+      - Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - dynamodb:BatchGetItem
+          - dynamodb:GetItem
+          - dynamodb:Query
+          - dynamodb:Scan
+          Resource:
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${UsersTable}
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${UsersTable}/index/*
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${FlowTable}
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${FlowTable}/index/*
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApartmentTable}
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApartmentTable}/index/*
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${BillingTable}
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${BillingTable}/index/*
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LeaksTable}
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LeaksTable}/index/*
+      Events:
+        RootRoute:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ProfileApiGateway
+            Path: /
+            Method: ANY
+        ProxyRoute:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ProfileApiGateway
+            Path: /{proxy+}
+            Method: ANY
+    Metadata:
+      SamResourceId: ProfileFunction
+Outputs:
+  ProfileBaseUrl:
+    Description: Base URL for the deployed profile API stage.
+    Value:
+      Fn::Sub: https://${ProfileApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}
+  ProfileCustomBaseUrl:
+    Description: Custom HTTPS base URL for the deployed profile API.
+    Value:
+      Fn::Sub: https://${CustomDomainName}
+  ProfileEndpoint:
+    Description: GET endpoint for profile lookup.
+    Value:
+      Fn::Sub: https://${ProfileApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/api/profile
+  ProfileCustomEndpoint:
+    Description: Custom HTTPS GET endpoint for profile lookup.
+    Value:
+      Fn::Sub: https://${CustomDomainName}/api/profile

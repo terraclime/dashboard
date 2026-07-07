@@ -1,0 +1,140 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Terraclime reports microservice deployed as a dedicated Lambda.
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+  UseDemoData:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+    - 'true'
+    - 'false'
+  AwsRegion:
+    Type: String
+    Default: ap-south-1
+  UsersTable:
+    Type: String
+    Default: UserCredentials
+  FlowTable:
+    Type: String
+    Default: flow_data
+  DeviceTable:
+    Type: String
+    Default: device_data
+  ApartmentTable:
+    Type: String
+    Default: apartment_data
+  BillingTable:
+    Type: String
+    Default: billing_cycles
+  LeaksTable:
+    Type: String
+    Default: leak_events
+  CustomDomainName:
+    Type: String
+    Default: reports.terraclime.com
+    Description: Custom domain name for the reports API.
+  CertificateArn:
+    Type: String
+    Default: ''
+    Description: ACM certificate ARN for CustomDomainName.
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 15
+    MemorySize: 256
+    Architectures:
+    - x86_64
+    Environment:
+      Variables:
+        NODE_ENV: production
+        USE_DEMO_DATA:
+          Ref: UseDemoData
+        USERS_TABLE:
+          Ref: UsersTable
+        FLOW_TABLE:
+          Ref: FlowTable
+        DEVICE_TABLE:
+          Ref: DeviceTable
+        APARTMENT_TABLE:
+          Ref: ApartmentTable
+        BILLING_TABLE:
+          Ref: BillingTable
+        LEAKS_TABLE:
+          Ref: LeaksTable
+Resources:
+  ReportsApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName:
+        Ref: StageName
+      Domain:
+        DomainName:
+          Ref: CustomDomainName
+        CertificateArn:
+          Ref: CertificateArn
+        EndpointConfiguration: REGIONAL
+        SecurityPolicy: TLS_1_2
+  ReportsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://terraclime-data-live-artifacts-717279694116-ap-south-1/terraclime-reports/1fde352af7872e786e3cd2662c4151e8
+      Handler: reports-api/src/index.handler
+      Policies:
+      - Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - dynamodb:BatchGetItem
+          - dynamodb:GetItem
+          - dynamodb:Query
+          - dynamodb:Scan
+          Resource:
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${UsersTable}
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${UsersTable}/index/*
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${FlowTable}
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${FlowTable}/index/*
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DeviceTable}
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DeviceTable}/index/*
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApartmentTable}
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApartmentTable}/index/*
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${BillingTable}
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${BillingTable}/index/*
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LeaksTable}
+          - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LeaksTable}/index/*
+      Events:
+        RootRoute:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ReportsApiGateway
+            Path: /
+            Method: ANY
+        ProxyRoute:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: ReportsApiGateway
+            Path: /{proxy+}
+            Method: ANY
+    Metadata:
+      SamResourceId: ReportsFunction
+Outputs:
+  ReportsBaseUrl:
+    Description: Base URL for the deployed reports API stage.
+    Value:
+      Fn::Sub: https://${ReportsApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}
+  ReportsCustomBaseUrl:
+    Description: Custom HTTPS base URL for the deployed reports API.
+    Value:
+      Fn::Sub: https://${CustomDomainName}
+  ReportsOverviewEndpoint:
+    Description: GET endpoint for reports overview.
+    Value:
+      Fn::Sub: https://${ReportsApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/api/reports/overview
+  ReportsCustomOverviewEndpoint:
+    Description: Custom HTTPS GET endpoint for reports overview.
+    Value:
+      Fn::Sub: https://${CustomDomainName}/api/reports/overview

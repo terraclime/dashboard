@@ -1,0 +1,14 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "terraclime-login-auth"
+resolve_s3 = false
+s3_bucket = "terraclime-data-live-artifacts-717279694116-ap-south-1"
+s3_prefix = "terraclime-login-auth"
+region = "ap-south-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+image_repositories = []
+
+[default.global.parameters]
+region = "ap-south-1"

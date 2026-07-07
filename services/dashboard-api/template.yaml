@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Terraclime dashboard microservice deployed as a dedicated Lambda.
+
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+  UseDemoData:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+  AwsRegion:
+    Type: String
+    Default: ap-south-1
+  FlowTable:
+    Type: String
+    Default: flow_data
+  DeviceTable:
+    Type: String
+    Default: device_data
+  ApartmentTable:
+    Type: String
+    Default: apartment_data
+  TariffTable:
+    Type: String
+    Default: tariff_configs
+  CustomDomainName:
+    Type: String
+    Default: overview.terraclime.com
+    Description: Custom domain name for the dashboard overview API.
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: ACM certificate ARN for CustomDomainName.
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 15
+    MemorySize: 256
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        NODE_ENV: production
+        USE_DEMO_DATA: !Ref UseDemoData
+        FLOW_TABLE: !Ref FlowTable
+        DEVICE_TABLE: !Ref DeviceTable
+        APARTMENT_TABLE: !Ref ApartmentTable
+        TARIFF_TABLE: !Ref TariffTable
+
+Resources:
+  DashboardApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref StageName
+      Domain:
+        DomainName: !Ref CustomDomainName
+        CertificateArn: !Ref CertificateArn
+        EndpointConfiguration: REGIONAL
+        SecurityPolicy: TLS_1_2
+
+  DashboardFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../microservice-runtime/
+      Handler: dashboard-api/src/index.handler
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:BatchGetItem
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:Query
+                - dynamodb:Scan
+                - dynamodb:UpdateItem
+              Resource:
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${FlowTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${FlowTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DeviceTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DeviceTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApartmentTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApartmentTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TariffTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TariffTable}/index/*
+      Events:
+        RootRoute:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DashboardApiGateway
+            Path: /
+            Method: ANY
+        ProxyRoute:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DashboardApiGateway
+            Path: /{proxy+}
+            Method: ANY
+
+Outputs:
+  DashboardBaseUrl:
+    Description: Base URL for the deployed dashboard API stage.
+    Value: !Sub https://${DashboardApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}
+  DashboardCustomBaseUrl:
+    Description: Custom HTTPS base URL for the deployed dashboard API.
+    Value: !Sub https://${CustomDomainName}
+  DashboardOverviewEndpoint:
+    Description: GET endpoint for dashboard overview.
+    Value: !Sub https://${DashboardApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/api/dashboard/overview
+  DashboardCustomOverviewEndpoint:
+    Description: Custom HTTPS GET endpoint for dashboard overview.
+    Value: !Sub https://${CustomDomainName}/api/dashboard/overview
+  DashboardCustomTariffEndpoint:
+    Description: Custom HTTPS endpoint for dashboard tariff configuration.
+    Value: !Sub https://${CustomDomainName}/api/dashboard/tariff
+
+

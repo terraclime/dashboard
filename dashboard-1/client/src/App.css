@@ -1,0 +1,15 @@
+body {
+  margin: 0;
+  font-family: "DM Sans", "Poppins", sans-serif;
+  background: #f5f7fb;
+  color: #1f2937;
+}
+
+.App {
+  min-height: 100vh;
+  background: #f5f7fb;
+}
+
+.dm-sans {
+  font-family: "DM Sans", sans-serif;
+}

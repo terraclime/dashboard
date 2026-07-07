@@ -1,0 +1,15 @@
+{
+  "name": "@terraclime/dashboard-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "powershell -ExecutionPolicy Bypass -File scripts/build.ps1",
+    "deploy": "powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1",
+    "start": "node ../microservice-runtime/dashboard-api/src/index.js",
+    "start:live": "node -e \"process.env.USE_DEMO_DATA='false'; import('../microservice-runtime/dashboard-api/src/index.js')\"",
+    "start:sam": "powershell -ExecutionPolicy Bypass -File scripts/start-sam.ps1",
+    "sam:build": "powershell -ExecutionPolicy Bypass -File scripts/build.ps1",
+    "sam:deploy": "powershell -ExecutionPolicy Bypass -File scripts/deploy-guided.ps1"
+  }
+}

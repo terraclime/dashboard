@@ -1,0 +1,81 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Terraclime prepaid microservice deployed as a dedicated Lambda.
+
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+  UseDemoData:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+  AwsRegion:
+    Type: String
+    Default: ap-south-1
+  PrepaidTable:
+    Type: String
+    Default: prepaid_zones
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 15
+    MemorySize: 256
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        NODE_ENV: production
+        USE_DEMO_DATA: !Ref UseDemoData
+        AWS_REGION: !Ref AwsRegion
+        PREPAID_TABLE: !Ref PrepaidTable
+
+Resources:
+  PrepaidApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref StageName
+
+  PrepaidFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../microservice-runtime/
+      Handler: prepaid-api/src/index.handler
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Query
+                - dynamodb:Scan
+                - dynamodb:UpdateItem
+              Resource:
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PrepaidTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PrepaidTable}/index/*
+      Events:
+        RootRoute:
+          Type: Api
+          Properties:
+            RestApiId: !Ref PrepaidApiGateway
+            Path: /
+            Method: ANY
+        ProxyRoute:
+          Type: Api
+          Properties:
+            RestApiId: !Ref PrepaidApiGateway
+            Path: /{proxy+}
+            Method: ANY
+
+Outputs:
+  PrepaidBaseUrl:
+    Description: Base URL for the deployed prepaid API stage.
+    Value: !Sub https://${PrepaidApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}
+  PrepaidOverviewEndpoint:
+    Description: GET endpoint for prepaid overview.
+    Value: !Sub https://${PrepaidApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/api/prepaid/overview
+
+

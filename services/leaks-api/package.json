@@ -1,0 +1,11 @@
+{
+  "name": "@terraclime/leaks-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node ../microservice-runtime/leaks-api/src/index.js",
+    "sam:build": "sam build --template-file template.yaml",
+    "sam:deploy": "sam deploy --guided --template-file template.yaml"
+  }
+}

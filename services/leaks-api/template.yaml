@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Terraclime leaks microservice deployed as a dedicated Lambda.
+
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+  UseDemoData:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+  AwsRegion:
+    Type: String
+    Default: ap-south-1
+  UsersTable:
+    Type: String
+    Default: UserCredentials
+  FlowTable:
+    Type: String
+    Default: flow_data
+  ApartmentTable:
+    Type: String
+    Default: apartment_data
+  BillingTable:
+    Type: String
+    Default: billing_cycles
+  LeaksTable:
+    Type: String
+    Default: leak_events
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 15
+    MemorySize: 256
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        NODE_ENV: production
+        USE_DEMO_DATA: !Ref UseDemoData
+        AWS_REGION: !Ref AwsRegion
+        USERS_TABLE: !Ref UsersTable
+        FLOW_TABLE: !Ref FlowTable
+        APARTMENT_TABLE: !Ref ApartmentTable
+        BILLING_TABLE: !Ref BillingTable
+        LEAKS_TABLE: !Ref LeaksTable
+
+Resources:
+  LeaksApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref StageName
+
+  LeaksFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../microservice-runtime/
+      Handler: leaks-api/src/index.handler
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:BatchGetItem
+                - dynamodb:GetItem
+                - dynamodb:Query
+                - dynamodb:Scan
+              Resource:
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${UsersTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${UsersTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${FlowTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${FlowTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApartmentTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApartmentTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${BillingTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${BillingTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LeaksTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LeaksTable}/index/*
+      Events:
+        RootRoute:
+          Type: Api
+          Properties:
+            RestApiId: !Ref LeaksApiGateway
+            Path: /
+            Method: ANY
+        ProxyRoute:
+          Type: Api
+          Properties:
+            RestApiId: !Ref LeaksApiGateway
+            Path: /{proxy+}
+            Method: ANY
+
+Outputs:
+  LeaksBaseUrl:
+    Description: Base URL for the deployed leaks API stage.
+    Value: !Sub https://${LeaksApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}
+  LeaksSummaryEndpoint:
+    Description: GET endpoint for leak summary.
+    Value: !Sub https://${LeaksApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/api/leaks/summary
+
+

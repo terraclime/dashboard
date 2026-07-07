@@ -1,0 +1,167 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Terraclime bill-delivery microservice deployed as a dedicated Lambda.
+
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+  UseDemoData:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+  ZeptoApiKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+  SmtpHost:
+    Type: String
+    Default: smtp.zeptomail.in
+  SmtpPort:
+    Type: String
+    Default: "587"
+  SmtpSecure:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+  SmtpUser:
+    Type: String
+    Default: emailapikey
+  SmtpPass:
+    Type: String
+    Default: ""
+    NoEcho: true
+  SmtpFrom:
+    Type: String
+    Default: '"Terraclime Billing" <notifications@terraclime.com>'
+  BillTestRecipient:
+    Type: String
+    Default: ""
+  MailDryRun:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+  AwsRegion:
+    Type: String
+    Default: ap-south-1
+  UsersTable:
+    Type: String
+    Default: UserCredentials
+  FlowTable:
+    Type: String
+    Default: flow_data
+  ApartmentTable:
+    Type: String
+    Default: apartment_data
+  TariffTable:
+    Type: String
+    Default: tariff_configs
+  LeaksTable:
+    Type: String
+    Default: leak_data
+  CustomDomainName:
+    Type: String
+    Default: bills-api.terraclime.com
+    Description: Custom domain name for the bill-delivery API.
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: ACM certificate ARN for CustomDomainName.
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 30
+    MemorySize: 512
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        NODE_ENV: production
+        USE_DEMO_DATA: !Ref UseDemoData
+        ZEPTO_API_KEY: !Ref ZeptoApiKey
+        SMTP_HOST: !Ref SmtpHost
+        SMTP_PORT: !Ref SmtpPort
+        SMTP_SECURE: !Ref SmtpSecure
+        SMTP_USER: !Ref SmtpUser
+        SMTP_PASS: !Ref SmtpPass
+        SMTP_FROM: !Ref SmtpFrom
+        BILL_TEST_RECIPIENT: !Ref BillTestRecipient
+        MAIL_DRY_RUN: !Ref MailDryRun
+        USERS_TABLE: !Ref UsersTable
+        FLOW_TABLE: !Ref FlowTable
+        APARTMENT_TABLE: !Ref ApartmentTable
+        TARIFF_TABLE: !Ref TariffTable
+        LEAKS_TABLE: !Ref LeaksTable
+
+Resources:
+  BillsApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref StageName
+      Domain:
+        DomainName: !Ref CustomDomainName
+        CertificateArn: !Ref CertificateArn
+        EndpointConfiguration: REGIONAL
+        SecurityPolicy: TLS_1_2
+
+  BillsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../microservice-runtime/
+      Handler: bills-api/src/index.handler
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:BatchGetItem
+                - dynamodb:GetItem
+                - dynamodb:Query
+                - dynamodb:Scan
+              Resource:
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${UsersTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${UsersTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${FlowTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${FlowTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApartmentTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApartmentTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TariffTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TariffTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LeaksTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LeaksTable}/index/*
+      Events:
+        RootRoute:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BillsApiGateway
+            Path: /
+            Method: ANY
+        ProxyRoute:
+          Type: Api
+          Properties:
+            RestApiId: !Ref BillsApiGateway
+            Path: /{proxy+}
+            Method: ANY
+
+Outputs:
+  BillsBaseUrl:
+    Description: Base URL for the deployed bill-delivery API stage.
+    Value: !Sub https://${BillsApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}
+  BillsSendBulkEndpoint:
+    Description: POST endpoint for bulk bill delivery.
+    Value: !Sub https://${BillsApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/api/bills/send-bulk
+  BillsCustomBaseUrl:
+    Description: Custom HTTPS base URL for the deployed bill-delivery API.
+    Value: !Sub https://${CustomDomainName}
+  BillsCustomSendBulkEndpoint:
+    Description: Custom HTTPS POST endpoint for bulk bill delivery.
+    Value: !Sub https://${CustomDomainName}/api/bills/send-bulk
+
+

@@ -719,8 +719,12 @@ function demoReadingsForFlat(flat, options = {}) {
   const includedDates = options.periodStart && options.periodEnd
     ? new Set(buildDateRange(options.periodStart, options.periodEnd))
     : null;
+  const startAfterDate = normalizeIsoDate(options.periodStartAfter);
   const dailyConsumption = includedDates
-    ? flat.daily_consumption.filter((entry) => includedDates.has(normalizeIsoDate(entry.date)))
+    ? flat.daily_consumption.filter((entry) =>
+        includedDates.has(normalizeIsoDate(entry.date)) &&
+        (!startAfterDate || normalizeIsoDate(entry.date) > startAfterDate)
+      )
     : flat.daily_consumption;
   const leakEvents = includedDates
     ? (flat.leak_events || []).filter((event) =>
@@ -986,9 +990,18 @@ export async function getReadingsForFlat(flatId, cycleId, apartmentId, options =
   ]);
 
   const bounds = buildCycleBounds(cycle, options);
+  const startAfterTime = options.periodStartAfter
+    ? new Date(options.periodStartAfter).getTime()
+    : null;
+  const isAfterStartBoundary = (record) => {
+    if (!Number.isFinite(startAfterTime)) return true;
+    const recordTime = new Date(record?.timestamp || record?.date).getTime();
+    return Number.isFinite(recordTime) && recordTime > startAfterTime;
+  };
   const currentFlow = bounds
     ? flatResult.flowRecords.filter((record) =>
-        bounds.current.has(normalizeIsoDateInTimezone(record?.timestamp || record?.date))
+        bounds.current.has(normalizeIsoDateInTimezone(record?.timestamp || record?.date)) &&
+        isAfterStartBoundary(record)
       )
     : flatResult.flowRecords;
   const previousFlow = bounds
@@ -999,7 +1012,8 @@ export async function getReadingsForFlat(flatId, cycleId, apartmentId, options =
 
   const currentLeaks = bounds
     ? flatResult.leakEvents.filter((event) =>
-        bounds.current.has(normalizeIsoDateInTimezone(event?.timestamp || event?.date))
+        bounds.current.has(normalizeIsoDateInTimezone(event?.timestamp || event?.date)) &&
+        isAfterStartBoundary(event)
       )
     : flatResult.leakEvents;
 

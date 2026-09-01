@@ -166,7 +166,7 @@ Resources:
   BillsFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: s3://terraclime-data-live-artifacts-717279694116-ap-south-1/terraclime-bills-api/8d8ccda5fe6b26f9f77e9357e6a67979
+      CodeUri: s3://terraclime-data-live-artifacts-717279694116-ap-south-1/terraclime-bills-api/2229c203b7ebab5d234691c29523a304
       Handler: bills-api/src/index.handler
       Policies:
       - Version: '2012-10-17'

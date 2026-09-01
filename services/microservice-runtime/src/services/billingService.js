@@ -228,14 +228,14 @@ const mergeFlatRecord = (target, source) => {
     target.resident_status = source.resident_status;
     target.occupancy_id ||= source.occupancy_id;
   }
-  if (target.resident_status !== "vacant" && (!target.occupancy_explicit || source.occupancy_explicit)) {
-    target.resident_name = source.resident_name || target.resident_name;
-    target.resident_email = source.resident_email || target.resident_email;
-    target.resident_whatsapp = source.resident_whatsapp || target.resident_whatsapp;
-  } else {
+  if (target.resident_status === "vacant") {
     target.resident_name = "";
     target.resident_email = "";
     target.resident_whatsapp = "";
+  } else if (!target.occupancy_explicit || source.occupancy_explicit) {
+    target.resident_name = source.resident_name || target.resident_name;
+    target.resident_email = source.resident_email || target.resident_email;
+    target.resident_whatsapp = source.resident_whatsapp || target.resident_whatsapp;
   }
 
   const devices = new Map(target.devices.map((device) => [device.device_id, device]));
@@ -547,9 +547,16 @@ const buildOccupancyWindows = ({ flatsByKey, finalizations = [], requestedCycle 
           start: flat.occupancy_start_date
             ? [requestedCycle.period_start, flat.occupancy_start_date].sort().at(-1)
             : latestPrior
-              ? [requestedCycle.period_start, addDays(latestPrior.periodEnd, 1)].sort().at(-1)
+              ? [
+                  requestedCycle.period_start,
+                  latestPrior.created_at ? latestPrior.periodEnd : addDays(latestPrior.periodEnd, 1),
+                ].sort().at(-1)
               : requestedCycle.period_start,
           end: requestedCycle.period_end,
+          startAfter:
+            !flat.occupancy_start_date && latestPrior?.created_at
+              ? latestPrior.created_at
+              : null,
           status: "open",
           finalization: null,
         });
@@ -578,6 +585,11 @@ const buildConsumptionByFlat = ({ flowRecords = [], flatsByKey, deviceToFlat, re
       end: requestedCycle.period_end,
     };
     if (!window.start || !window.end || !date || date < window.start || date > window.end) return;
+    if (window.startAfter) {
+      const readingTime = new Date(normalizeTimestamp(record)).getTime();
+      const boundaryTime = new Date(window.startAfter).getTime();
+      if (Number.isFinite(boundaryTime) && (!Number.isFinite(readingTime) || readingTime <= boundaryTime)) return;
+    }
     consumptionByFlat.set(summaryKey, (consumptionByFlat.get(summaryKey) || 0) + sumFlowConsumption(record));
   });
 
@@ -593,7 +605,10 @@ const buildConsumptionByFlat = ({ flowRecords = [], flatsByKey, deviceToFlat, re
     };
     if (!window.start || !window.end) return;
     const fallbackTotal = flat.daily_consumption
-      .filter((entry) => entry.date >= window.start && entry.date <= window.end)
+      .filter((entry) =>
+        entry.date <= window.end &&
+        (window.startAfter ? entry.date > window.start : entry.date >= window.start)
+      )
       .reduce((sum, entry) => sum + toFiniteNumber(entry.litres, 0), 0);
 
     if (fallbackTotal) {

@@ -152,13 +152,14 @@ export async function buildFinalizationPreview({ apartmentId, flatId, cycleId, c
   }
 
   const finalizations = await listFinalizations(apartmentId, cycle.startDate);
-  const periodStart = getResidentPeriodStart(finalizations, flat, cycle.startDate);
+  const { periodStart, periodStartAfter } = getResidentPeriodWindow(finalizations, flat, cycle.startDate);
   const residentCycle = { ...cycle, startDate: periodStart };
   validateFinalizationInput({ apartmentId, cycle: residentCycle, cutoffDate: normalizedCutoff });
 
   const readings = await getReadingsForFlat(flatId, cycle.cycleId, apartmentId, {
     periodStart,
     periodEnd: normalizedCutoff,
+    periodStartAfter,
   });
   if (!readings.hasReadings) {
     throw Object.assign(
@@ -206,9 +207,12 @@ const matchingFinalization = (finalizations, flat) =>
       finalizationMatchesOccupancy(item, flat)
   );
 
-const getResidentPeriodStart = (finalizations, flat, cycleStart) => {
+const getResidentPeriodWindow = (finalizations, flat, cycleStart) => {
   if (flat.occupancyStartDate) {
-    return [cycleStart, flat.occupancyStartDate].sort().at(-1);
+    return {
+      periodStart: [cycleStart, flat.occupancyStartDate].sort().at(-1),
+      periodStartAfter: null,
+    };
   }
   const latestOtherResident = finalizations
     .filter(
@@ -218,7 +222,16 @@ const getResidentPeriodStart = (finalizations, flat, cycleStart) => {
     )
     .sort((left, right) => String(left.periodEnd).localeCompare(String(right.periodEnd)))
     .at(-1);
-  return latestOtherResident ? addDays(latestOtherResident.periodEnd, 1) : cycleStart;
+  if (!latestOtherResident) return { periodStart: cycleStart, periodStartAfter: null };
+  return latestOtherResident.created_at
+    ? {
+        periodStart: [cycleStart, latestOtherResident.periodEnd].sort().at(-1),
+        periodStartAfter: latestOtherResident.created_at,
+      }
+    : {
+        periodStart: [cycleStart, addDays(latestOtherResident.periodEnd, 1)].sort().at(-1),
+        periodStartAfter: null,
+      };
 };
 
 /** Sequential send with concurrency limit to avoid SMTP rate-limits */
@@ -292,10 +305,11 @@ export async function sendBulkBills(req, res) {
   (async () => {
     try {
       const tasks = flats.map((flat) => async () => {
-        const periodStart = getResidentPeriodStart(finalizations, flat, cycle.startDate);
+        const { periodStart, periodStartAfter } = getResidentPeriodWindow(finalizations, flat, cycle.startDate);
         const flatReadings = await getReadingsForFlat(flat.flatId, cycle.cycleId, apartmentId, {
           periodStart,
           periodEnd: cycle.endDate,
+          periodStartAfter,
         });
 
         const billId = `${cycleId}-${flat.flatId}`;
@@ -354,10 +368,11 @@ export async function sendFlatBill(req, res) {
       return res.status(422).json({ success: false, message: `Flat ${flatId} has no registered email` });
     }
 
-    const periodStart = getResidentPeriodStart(finalizations, flat, cycle.startDate);
+    const { periodStart, periodStartAfter } = getResidentPeriodWindow(finalizations, flat, cycle.startDate);
     const readings = await getReadingsForFlat(flatId, cycleId, apartmentId, {
       periodStart,
       periodEnd: cycle.endDate,
+      periodStartAfter,
     });
 
     const billId = `${cycleId}-${flatId}`;
@@ -399,10 +414,11 @@ export async function sendBillByEmail(req, res) {
     if (matchingFinalization(finalizations, flat)) {
       return res.status(409).json({ success: false, message: `Flat ${flat.flatId}'s current resident is finalized` });
     }
-    const periodStart = getResidentPeriodStart(finalizations, flat, cycle.startDate);
+    const { periodStart, periodStartAfter } = getResidentPeriodWindow(finalizations, flat, cycle.startDate);
     const readings = await getReadingsForFlat(flat.flatId, cycle.cycleId, apartmentId, {
       periodStart,
       periodEnd: cycle.endDate,
+      periodStartAfter,
     });
     const billId = `${cycle.cycleId}-${flat.flatId}`;
     const billData = buildBillData({ flat, readings, cycle: { ...cycle, startDate: periodStart }, billId });

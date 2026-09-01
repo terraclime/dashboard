@@ -77,6 +77,25 @@ export const sendBulkBills = (cycleId, concurrency = 5, flatIds = [], apartmentI
 export const getBillJobStatus = (jobId) =>
   billsClient.get(`/bills/status/${jobId}`);
 
+export const previewTenantFinalization = (flatId, apartmentId, cycleId, cutoffDate) =>
+  billsClient.get(`/bills/finalization-preview/${flatId}`, {
+    params: {
+      apartment_id: apartmentId,
+      cycleId,
+      cutoff_date: cutoffDate,
+    },
+  });
+
+export const finalizeTenantBilling = (flatId, apartmentId, cycleId, cutoffDate) =>
+  billsClient.post(`/bills/finalize/${flatId}`, {
+    apartment_id: apartmentId,
+    cycleId,
+    cutoff_date: cutoffDate,
+  });
+
+export const retryFinalBillEmail = (finalizationId) =>
+  billsClient.post(`/bills/finalizations/${finalizationId}/retry-email`);
+
 export const fetchPrepaidOverview = (zoneId) =>
   apiClient.get("/prepaid/overview", { params: { zone_id: zoneId } });
 

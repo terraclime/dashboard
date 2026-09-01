@@ -46,6 +46,43 @@ const formatNumber = (value) => {
 
 const formatMoney = (value) => `Rs. ${formatNumber(value)}`;
 
+const formatOptionalNumber = (value) =>
+  value === null || value === undefined ? "No data" : formatNumber(value);
+
+const formatOptionalMoney = (value) =>
+  value === null || value === undefined ? "No data" : formatMoney(value);
+
+const LEGACY_INLETS = [
+  ["kitchen", "Kitchen"],
+  ["bath1", "Bath 1"],
+  ["bath2", "Bath 2"],
+  ["bath3", "Bath 3"],
+  ["utility", "Utility"],
+];
+
+const normalizeInletReadings = (inletReadings, inlets, leakage) => {
+  if (Array.isArray(inletReadings)) {
+    const normalized = inletReadings.map((inlet, index) => ({
+      label: inlet?.label || inlet?.location || `Inlet ${index + 1}`,
+      consumed: Number(inlet?.consumed || 0),
+      leaked: Number(inlet?.leaked || 0),
+    }));
+
+    return normalized.length
+      ? normalized
+      : [{ label: "No configured inlet", consumed: 0, leaked: 0 }];
+  }
+
+  const hasLegacyReadings = [...Object.keys(inlets || {}), ...Object.keys(leakage || {})].length > 0;
+  return hasLegacyReadings
+    ? LEGACY_INLETS.map(([key, label]) => ({
+        label,
+        consumed: Number(inlets?.[key] || 0),
+        leaked: Number(leakage?.[key] || 0),
+      }))
+    : [{ label: "No configured inlet", consumed: 0, leaked: 0 }];
+};
+
 export function generateBillHTML(data) {
   const {
     bill_start_date,
@@ -59,6 +96,7 @@ export function generateBillHTML(data) {
     inst_num,
     active_num,
     inlets = {},
+    inlet_readings,
     tariff_per_kl,
     leakage = {},
     leakage_penalty_per_l,
@@ -66,16 +104,16 @@ export function generateBillHTML(data) {
     prev_charges,
     total_amount_due,
     society_legal_name,
-    app_name,
     society_bank,
     society_acc_no,
     society_ifsc,
+    society_acc_name,
   } = data;
 
-  const inletKeys = ["kitchen", "bath1", "bath2", "bath3", "utility"];
-  const inletLabels = ["Kitchen", "Bath 1", "Bath 2", "Bath 3", "Utility"];
-  const consumed = inletKeys.map((key) => Number(inlets[key] || 0));
-  const leaked = inletKeys.map((key) => Number(leakage[key] || 0));
+  const meterReadings = normalizeInletReadings(inlet_readings, inlets, leakage);
+  const inletLabels = meterReadings.map((inlet) => inlet.label);
+  const consumed = meterReadings.map((inlet) => inlet.consumed);
+  const leaked = meterReadings.map((inlet) => inlet.leaked);
   const totalConsumed = consumed.reduce((sum, value) => sum + value, 0);
   const totalLeaked = leaked.reduce((sum, value) => sum + value, 0);
   const tariff = consumed.map((value) => +((value * tariff_per_kl) / 1000).toFixed(2));
@@ -86,6 +124,9 @@ export function generateBillHTML(data) {
   const grandTotal = +(totalTariff + totalPenalty).toFixed(2);
   const amountDue = total_amount_due ?? grandTotal;
   const columns = (values) => values.map((value) => `<td>${formatNumber(value)}</td>`).join("");
+  const tableColumnCount = inletLabels.length + 3;
+  const beneficiary = society_acc_name || society_legal_name;
+  const hasBankDetails = society_bank || society_acc_no || society_ifsc;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -100,7 +141,6 @@ export function generateBillHTML(data) {
   .hdr p{margin:0;font-size:12px;opacity:.85}
   .body{padding:24px 28px}
   .sec{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#1a6b3a;border-bottom:2px solid #1a6b3a;padding-bottom:4px;margin:22px 0 12px}
-  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
   .box{background:#f7fafc;border:1px solid #e2e8f0;border-radius:6px;padding:11px 13px}
   .lbl{font-size:10px;color:#666;margin-bottom:2px}
   .val{font-weight:700;color:#111;font-size:13px}
@@ -113,14 +153,12 @@ export function generateBillHTML(data) {
   tr.sub td{background:#edf7f1;font-weight:700;color:#1a6b3a}
   tr.gap td{height:6px;background:#fff;border:none}
   tr.grd td{background:#1a6b3a;color:#fff;font-weight:700;font-size:12px}
-  .prev{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-  .prev .box .val{font-size:15px}
+  .info th{width:38%;text-align:left;padding-left:10px}
+  .info td{text-align:left;padding-left:10px;font-weight:700}
+  .info .due{color:#c0392b}
   .due-box{background:#fff8e1;border:1px solid #f0c040;border-radius:6px;padding:14px 18px;display:flex;justify-content:space-between;align-items:center;margin:20px 0 0}
   .due-box .dlbl{font-size:13px;color:#555}
   .due-box .damt{font-size:22px;font-weight:700;color:#1a6b3a}
-  .pay{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
-  .pay .box .method{font-weight:700;font-size:12px;color:#1a6b3a;margin-bottom:5px}
-  .pay .box .detail{font-size:12px;color:#444;line-height:1.6}
   .ftr{background:#f0f4f8;padding:14px 28px;text-align:center;font-size:11px;color:#888;border-top:1px solid #e2e8f0}
 </style>
 </head>
@@ -132,46 +170,44 @@ export function generateBillHTML(data) {
   </div>
   <div class="body">
     <div class="sec">Basic Information</div>
-    <div class="grid3">
-      <div class="box">
-        <div class="lbl">Resident Name</div><div class="val">${escapeHtml(res_name)}</div>
-        <div class="lbl" style="margin-top:8px">Block and Flat</div><div class="val">${escapeHtml(flat_no)}</div>
-      </div>
-      <div class="box">
-        <div class="lbl">Bill Number</div><div class="val">#${escapeHtml(bill_id)}</div>
-        <div class="lbl" style="margin-top:8px">Issued</div><div class="val">${escapeHtml(issue_date)}</div>
-        <div class="lbl" style="margin-top:8px">Due Date</div><div class="val red">${escapeHtml(due_date)}</div>
-      </div>
-      <div class="box">
-        <div class="lbl">Inlet Meters</div><div class="val">${escapeHtml(inlet_num)}</div>
-        <div class="lbl" style="margin-top:8px">Installed</div><div class="val">${escapeHtml(inst_num)}</div>
-        <div class="lbl" style="margin-top:8px">Active</div><div class="val">${escapeHtml(active_num)}</div>
-      </div>
-    </div>
+    <table class="info">
+      <tbody>
+        <tr><th>Resident Name</th><td>${escapeHtml(res_name)}</td></tr>
+        <tr><th>Block and Flat</th><td>${escapeHtml(flat_no)}</td></tr>
+        <tr><th>Bill No.</th><td>#${escapeHtml(bill_id)}</td></tr>
+        <tr><th>Issued</th><td>${escapeHtml(issue_date)}</td></tr>
+        <tr><th>Due</th><td class="due">${escapeHtml(due_date)}</td></tr>
+        <tr><th>Inlet Meters</th><td>${escapeHtml(inlet_num)}</td></tr>
+        <tr><th>Installed</th><td>${escapeHtml(inst_num)}</td></tr>
+        <tr><th>Active</th><td>${escapeHtml(active_num)}</td></tr>
+      </tbody>
+    </table>
 
     <div class="sec">Water Consumption and Charges - Current Cycle</div>
     <table>
       <thead><tr><th class="l">Ref</th><th class="l">Details</th>${inletLabels
-        .map((label) => `<th>${label}</th>`)
+        .map((label) => `<th>${escapeHtml(label)}</th>`)
         .join("")}<th>Total</th></tr></thead>
       <tbody>
         <tr><td class="l">A</td><td class="l">Water Consumed (L)</td>${columns(consumed)}<td><strong>${formatNumber(totalConsumed)}</strong></td></tr>
-        <tr><td class="l">B</td><td class="l">Tariff / KL</td><td colspan="5" style="text-align:left;padding-left:8px">${formatMoney(tariff_per_kl)} per KL</td><td>-</td></tr>
+        <tr><td class="l">B</td><td class="l">Tariff / KL</td><td colspan="${inletLabels.length}" style="text-align:left;padding-left:8px">${formatMoney(tariff_per_kl)} per KL</td><td>-</td></tr>
         <tr class="sub"><td class="l">C</td><td class="l">Total Water Tariff</td>${columns(tariff)}<td>${formatMoney(totalTariff)}</td></tr>
-        <tr class="gap"><td colspan="8"></td></tr>
+        <tr class="gap"><td colspan="${tableColumnCount}"></td></tr>
         <tr><td class="l">D</td><td class="l">Leakage Detected (L)</td>${columns(leaked)}<td><strong>${formatNumber(totalLeaked)}</strong></td></tr>
-        <tr><td class="l">E</td><td class="l">Leakage Penalty / L</td><td colspan="5" style="text-align:left;padding-left:8px">${formatMoney(leakage_penalty_per_l)} per L</td><td>-</td></tr>
+        <tr><td class="l">E</td><td class="l">Leakage Penalty / L</td><td colspan="${inletLabels.length}" style="text-align:left;padding-left:8px">${formatMoney(leakage_penalty_per_l)} per L</td><td>-</td></tr>
         <tr class="sub"><td class="l">F</td><td class="l">Total Leakage Penalty</td>${columns(penalty)}<td>${formatMoney(totalPenalty)}</td></tr>
-        <tr class="gap"><td colspan="8"></td></tr>
+        <tr class="gap"><td colspan="${tableColumnCount}"></td></tr>
         <tr class="grd"><td class="l">G</td><td class="l">Total Water Charge</td>${columns(totals)}<td>${formatMoney(grandTotal)}</td></tr>
       </tbody>
     </table>
 
     <div class="sec">Previous Billing Cycle</div>
-    <div class="prev">
-      <div class="box"><div class="lbl">Total Water Consumed (L)</div><div class="val">${formatNumber(prev_consumed)}</div></div>
-      <div class="box"><div class="lbl">Total Water Charges</div><div class="val">${formatMoney(prev_charges)}</div></div>
-    </div>
+    <table class="info">
+      <tbody>
+        <tr><th>Total Water Consumed (L)</th><td>${formatOptionalNumber(prev_consumed)}</td></tr>
+        <tr><th>Total Water Charges</th><td>${formatOptionalMoney(prev_charges)}</td></tr>
+      </tbody>
+    </table>
 
     <div class="due-box">
       <div class="dlbl">Total Amount Due by <strong>${escapeHtml(due_date)}</strong></div>
@@ -181,12 +217,16 @@ export function generateBillHTML(data) {
     <div class="sec" style="margin-top:22px">Payment Instructions</div>
     <p style="margin:0 0 10px;font-size:13px;">
       Please pay <strong>${formatMoney(amountDue)}</strong> by <strong>${escapeHtml(due_date)}</strong>
-      directly to <em>${escapeHtml(society_legal_name)}</em>.
+      directly to <strong>${escapeHtml(society_legal_name)}</strong> (your RWA).
     </p>
-    <div class="pay">
-      <div class="box"><div class="method">Via App</div><div class="detail">Pay using the Utility section on <strong>${escapeHtml(app_name)}</strong></div></div>
-      <div class="box"><div class="method">Bank Transfer</div><div class="detail"><strong>${escapeHtml(society_bank)}</strong><br />Acc No: ${escapeHtml(society_acc_no)}<br />IFSC: ${escapeHtml(society_ifsc)}</div></div>
-    </div>
+    ${hasBankDetails ? `<table class="info">
+      <tbody>
+        <tr><th>Beneficiary</th><td>${escapeHtml(beneficiary)}</td></tr>
+        <tr><th>Bank</th><td>${escapeHtml(society_bank)}</td></tr>
+        <tr><th>Account No.</th><td>${escapeHtml(society_acc_no)}</td></tr>
+        <tr><th>IFSC</th><td>${escapeHtml(society_ifsc)}</td></tr>
+      </tbody>
+    </table>` : `<div class="box">Please contact your RWA for its bank account details.</div>`}
   </div>
   <div class="ftr">This is a system-generated bill. For queries, contact your society management.</div>
 </div>

@@ -1,7 +1,14 @@
 import React, { useEffect, useMemo, useState } from "react";
 import SideBar from "../components/SideBar";
 import NavBar from "../components/NavBar";
-import { fetchBillingSummary, sendBillByEmail, sendBulkBills } from "../api/endpoints";
+import {
+  fetchBillingSummary,
+  finalizeTenantBilling,
+  previewTenantFinalization,
+  retryFinalBillEmail,
+  sendBillByEmail,
+  sendBulkBills,
+} from "../api/endpoints";
 
 const formatCurrency = (value) => `\u20B9${value.toLocaleString("en-IN")}`;
 
@@ -11,6 +18,9 @@ const getPerFlatSummary = (billing) =>
   billing?.per_flat_summary || billing?.per_flat || [];
 
 const toIsoDate = (date) => date.toISOString().slice(0, 10);
+
+const toLocalIsoDate = (date = new Date()) =>
+  [date.getFullYear(), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0")].join("-");
 
 const getBillingCycleId = (billingCycle) => {
   const explicitCycleId = billingCycle?.cycle_id || billingCycle?.cycleId;
@@ -58,6 +68,14 @@ function Bill() {
   const [flatSendState, setFlatSendState] = useState({});
   const [bulkSending, setBulkSending] = useState(false);
   const [bulkResult, setBulkResult] = useState(null);
+  const [finalizationEntry, setFinalizationEntry] = useState(null);
+  const [cutoffDate, setCutoffDate] = useState("");
+  const [finalizationPreview, setFinalizationPreview] = useState(null);
+  const [finalizationLoading, setFinalizationLoading] = useState(false);
+  const [finalizationSubmitting, setFinalizationSubmitting] = useState(false);
+  const [finalizationError, setFinalizationError] = useState("");
+  const [finalizationState, setFinalizationState] = useState({});
+  const cycleId = getBillingCycleId(billing?.billing_cycle);
 
   const handleButtonOpen = () => setButtonOpen(!buttonOpen);
 
@@ -82,6 +100,145 @@ function Bill() {
     };
     load();
   }, []);
+
+  useEffect(() => {
+    if (!finalizationEntry || !cutoffDate || !cycleId) return undefined;
+    let cancelled = false;
+    const loadPreview = async () => {
+      setFinalizationLoading(true);
+      setFinalizationError("");
+      setFinalizationPreview(null);
+      try {
+        const apartmentId = localStorage.getItem("apartment_id");
+        const response = await previewTenantFinalization(
+          getBillFlatId(finalizationEntry),
+          apartmentId,
+          cycleId,
+          cutoffDate
+        );
+        if (!cancelled) setFinalizationPreview(response.data.preview);
+      } catch (err) {
+        if (!cancelled) {
+          setFinalizationError(
+            err?.response?.data?.message || err.message || "Unable to calculate the final bill."
+          );
+        }
+      } finally {
+        if (!cancelled) setFinalizationLoading(false);
+      }
+    };
+    loadPreview();
+    return () => {
+      cancelled = true;
+    };
+  }, [finalizationEntry, cutoffDate, cycleId]);
+
+  const updateFinalizationState = (flatId, finalization) => {
+    setFinalizationState((prev) => ({ ...prev, [flatId]: finalization }));
+    setBilling((prev) => {
+      if (!prev) return prev;
+      const updateRows = (rows = []) => rows.map((entry) =>
+        getBillFlatId(entry) === flatId
+          ? {
+              ...entry,
+              consumption_litres: finalization.consumption_litres,
+              projected_amount: finalization.water_charge,
+              billing_status: "finalized",
+              billing_period_start: finalization.periodStart,
+              billing_period_end: finalization.periodEnd,
+              finalization_id: finalization.finalization_id,
+              finalization_email_status: finalization.email_status,
+            }
+          : entry
+      );
+      const updatedPerFlat = updateRows(prev.per_flat);
+      const updatedPerFlatSummary = updateRows(prev.per_flat_summary);
+      const totalConsumption = updatedPerFlatSummary.reduce(
+        (sum, entry) => sum + Number(entry.consumption_litres || 0),
+        0
+      );
+      const projectedAmount = updatedPerFlatSummary.reduce(
+        (sum, entry) => sum + Number(entry.projected_amount || 0),
+        0
+      );
+      return {
+        ...prev,
+        total_consumption_litres: totalConsumption,
+        per_flat: updatedPerFlat,
+        per_flat_summary: updatedPerFlatSummary,
+        summary: {
+          ...(prev.summary || {}),
+          total_consumption_litres: totalConsumption,
+          projected_amount: projectedAmount,
+        },
+      };
+    });
+  };
+
+  const openFinalization = (entry) => {
+    const today = toLocalIsoDate();
+    const cycleStart = billing?.billing_cycle?.period_start || today;
+    const cycleEnd = billing?.billing_cycle?.period_end || today;
+    setFinalizationEntry(entry);
+    setCutoffDate([today, cycleEnd].sort()[0] < cycleStart ? cycleStart : [today, cycleEnd].sort()[0]);
+    setFinalizationPreview(null);
+    setFinalizationError("");
+  };
+
+  const closeFinalization = (force = false) => {
+    if (finalizationSubmitting && !force) return;
+    setFinalizationEntry(null);
+    setFinalizationPreview(null);
+    setFinalizationError("");
+  };
+
+  const handleFinalizeTenant = async () => {
+    if (!finalizationEntry || !finalizationPreview) return;
+    const flatId = getBillFlatId(finalizationEntry);
+    setFinalizationSubmitting(true);
+    setFinalizationError("");
+    try {
+      const apartmentId = localStorage.getItem("apartment_id");
+      const response = await finalizeTenantBilling(flatId, apartmentId, cycleId, cutoffDate);
+      updateFinalizationState(flatId, response.data.finalization);
+      closeFinalization(true);
+    } catch (err) {
+      const finalization = err?.response?.data?.finalization;
+      if (finalization) {
+        updateFinalizationState(flatId, finalization);
+      }
+      setFinalizationError(
+        err?.response?.data?.message || err.message || "Unable to finalize tenant billing."
+      );
+    } finally {
+      setFinalizationSubmitting(false);
+    }
+  };
+
+  const handleRetryFinalEmail = async (entry) => {
+    const flatId = getBillFlatId(entry);
+    const state = finalizationState[flatId];
+    const finalizationId = state?.finalization_id || entry.finalization_id;
+    if (!finalizationId) return;
+    setFinalizationState((prev) => ({
+      ...prev,
+      [flatId]: { ...state, email_status: "sending" },
+    }));
+    try {
+      const response = await retryFinalBillEmail(finalizationId);
+      updateFinalizationState(flatId, response.data.finalization);
+    } catch (err) {
+      const finalization = err?.response?.data?.finalization;
+      if (finalization) {
+        updateFinalizationState(flatId, finalization);
+      } else {
+        setFinalizationState((prev) => ({
+          ...prev,
+          [flatId]: { ...state, finalization_id: finalizationId, email_status: "failed" },
+        }));
+      }
+    }
+  };
 
   useEffect(() => {
     const handleStorage = (event) => {
@@ -135,8 +292,6 @@ function Bill() {
     if (!summary.total_consumption_litres) return 0;
     return Math.round(Number(summary.total_consumption_litres) || 0);
   }, [billing]);
-
-  const cycleId = getBillingCycleId(billing?.billing_cycle);
 
   const handleSendFlatBill = async (entry) => {
     const flatId = getBillFlatId(entry);
@@ -379,6 +534,9 @@ function Bill() {
                     displayFlats.map((entry) => {
                       const flatId = getBillFlatId(entry);
                       const sendStatus = flatSendState[flatId];
+                      const finalization = finalizationState[flatId];
+                      const isFinalized = entry.billing_status === "finalized" || Boolean(finalization);
+                      const finalEmailStatus = finalization?.email_status || entry.finalization_email_status;
                       return (
                         <tr key={flatId || getDisplayFlatNumber(entry)} className="hover:bg-gray-50">
                           <td className="px-4 py-3 font-medium text-gray-900">
@@ -394,35 +552,50 @@ function Bill() {
                             {formatCurrency(entry.projected_amount_adjusted)}
                           </td>
                           <td className="px-4 py-3 text-center">
-                            {sendStatus === "sent" ? (
-                              <span className="text-xs font-medium text-emerald-600">Sent</span>
-                            ) : sendStatus === "missing-email" ? (
-                              <span className="text-xs font-medium text-amber-600">
-                                No email
-                              </span>
-                            ) : sendStatus === "error" ? (
-                              <button
-                                type="button"
-                                onClick={() => handleSendFlatBill(entry)}
-                                className="text-xs font-medium text-red-500 underline hover:text-red-700"
-                                title="Send failed - click to retry"
-                              >
-                                Retry
-                              </button>
+                            {isFinalized ? (
+                              <div className="flex flex-col items-center gap-1">
+                                <span className="text-xs font-medium text-emerald-700">
+                                  Finalized through {finalization?.periodEnd || entry.billing_period_end}
+                                </span>
+                                {finalEmailStatus === "failed" ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRetryFinalEmail(entry)}
+                                    className="text-xs font-medium text-red-600 underline hover:text-red-700"
+                                  >
+                                    Retry final email
+                                  </button>
+                                ) : finalEmailStatus === "sending" ? (
+                                  <span className="text-xs text-gray-500">Sending email...</span>
+                                ) : (
+                                  <span className="text-xs text-gray-500">Final email sent</span>
+                                )}
+                              </div>
                             ) : (
-                              <button
-                                type="button"
-                                onClick={() => handleSendFlatBill(entry)}
-                                disabled={sendStatus === "sending"}
-                                title={
-                                  entry.resident_email
-                                    ? `Send bill to ${entry.resident_email}`
-                                    : "No resident email found"
-                                }
-                                className="rounded-md border border-[#00A877] px-3 py-1 text-xs font-medium text-[#00A877] transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-400"
-                              >
-                                {sendStatus === "sending" ? "Sending..." : "Send"}
-                              </button>
+                              <div className="flex flex-wrap justify-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleSendFlatBill(entry)}
+                                  disabled={sendStatus === "sending" || !entry.resident_email}
+                                  title={entry.resident_email ? `Send bill to ${entry.resident_email}` : "No resident email found"}
+                                  className={`rounded-md border px-3 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-400 ${
+                                    sendStatus === "error"
+                                      ? "border-red-400 text-red-600 hover:bg-red-50"
+                                      : "border-[#00A877] text-[#00A877] hover:bg-emerald-50"
+                                  }`}
+                                >
+                                  {sendStatus === "sending" ? "Sending..." : sendStatus === "sent" ? "Sent" : sendStatus === "error" ? "Retry" : "Send"}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => openFinalization(entry)}
+                                  disabled={!entry.resident_email}
+                                  className="rounded-md bg-amber-500 px-3 py-1 text-xs font-medium text-white transition hover:bg-amber-600 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400"
+                                  title="Close this resident's billing period and send a final bill"
+                                >
+                                  Finalize tenant
+                                </button>
+                              </div>
                             )}
                           </td>
                         </tr>
@@ -442,6 +615,76 @@ function Bill() {
               </table>
             </div>
           </section>
+          {finalizationEntry && (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="finalize-tenant-title"
+            >
+              <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <h3 id="finalize-tenant-title" className="text-xl font-semibold text-gray-900">
+                      Finalize tenant billing
+                    </h3>
+                    <p className="mt-1 text-sm text-gray-500">
+                      This permanently closes billing for {finalizationEntry.resident_name} in flat {getDisplayFlatNumber(finalizationEntry)}.
+                    </p>
+                  </div>
+                  <button type="button" onClick={() => closeFinalization()} className="text-xl text-gray-400 hover:text-gray-700" aria-label="Close">
+                    ×
+                  </button>
+                </div>
+
+                <label className="mt-5 block text-sm font-medium text-gray-700" htmlFor="tenant-cutoff-date">
+                  Move-out date
+                </label>
+                <input
+                  id="tenant-cutoff-date"
+                  type="date"
+                  value={cutoffDate}
+                  min={finalizationPreview?.periodStart || billing?.billing_cycle?.period_start}
+                  max={[toLocalIsoDate(), billing?.billing_cycle?.period_end || toLocalIsoDate()].sort()[0]}
+                  onChange={(event) => setCutoffDate(event.target.value)}
+                  disabled={finalizationSubmitting}
+                  className="mt-2 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-[#00A877] focus:outline-none focus:ring-2 focus:ring-[#8AE5C1]/50"
+                />
+
+                {finalizationLoading ? (
+                  <div className="mt-5 rounded-lg bg-gray-50 px-4 py-5 text-center text-sm text-gray-500">
+                    Calculating final consumption...
+                  </div>
+                ) : finalizationPreview ? (
+                  <div className="mt-5 rounded-xl border border-amber-100 bg-amber-50 p-4 text-sm">
+                    <dl className="grid grid-cols-2 gap-x-4 gap-y-3">
+                      <dt className="text-gray-500">Email</dt><dd className="text-right font-medium text-gray-900 break-all">{finalizationPreview.residentEmail}</dd>
+                      <dt className="text-gray-500">Billing period</dt><dd className="text-right font-medium text-gray-900">{finalizationPreview.periodStart} to {finalizationPreview.periodEnd}</dd>
+                      <dt className="text-gray-500">Water consumed</dt><dd className="text-right font-medium text-gray-900">{Number(finalizationPreview.consumption_litres || 0).toLocaleString("en-IN")} L</dd>
+                      <dt className="text-gray-500">Leakage</dt><dd className="text-right font-medium text-gray-900">{Number(finalizationPreview.leakage_litres || 0).toLocaleString("en-IN")} L</dd>
+                      <dt className="font-medium text-gray-700">Final amount</dt><dd className="text-right text-lg font-semibold text-gray-900">{formatCurrency(Number(finalizationPreview.total_amount || 0))}</dd>
+                    </dl>
+                  </div>
+                ) : null}
+
+                {finalizationError && (
+                  <div className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{finalizationError}</div>
+                )}
+
+                <p className="mt-4 text-xs text-gray-500">
+                  Usage after this date will not be charged to this resident. A future resident will start from the following day.
+                </p>
+                <div className="mt-6 flex justify-end gap-3">
+                  <button type="button" onClick={() => closeFinalization()} disabled={finalizationSubmitting} className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50">
+                    Cancel
+                  </button>
+                  <button type="button" onClick={handleFinalizeTenant} disabled={!finalizationPreview || finalizationLoading || finalizationSubmitting} className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-white hover:bg-amber-600 disabled:cursor-not-allowed disabled:bg-amber-200">
+                    {finalizationSubmitting ? "Finalizing..." : "Finalize and send email"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

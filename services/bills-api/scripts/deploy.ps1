@@ -41,6 +41,7 @@ $region = if ([string]::IsNullOrWhiteSpace($env:AWS_REGION)) { "ap-south-1" } el
 $artifactBucket = if ([string]::IsNullOrWhiteSpace($env:BILLS_API_ARTIFACT_BUCKET)) { "terraclime-data-live-artifacts-717279694116-ap-south-1" } else { $env:BILLS_API_ARTIFACT_BUCKET }
 $artifactPrefix = if ([string]::IsNullOrWhiteSpace($env:BILLS_API_ARTIFACT_PREFIX)) { "terraclime-bills-api" } else { $env:BILLS_API_ARTIFACT_PREFIX }
 $packagedTemplate = "packaged.yaml"
+$apartmentTimeZone = if ([string]::IsNullOrWhiteSpace($env:APARTMENT_TIME_ZONE)) { "Asia/Kolkata" } else { $env:APARTMENT_TIME_ZONE }
 
 $customDomainName = if ([string]::IsNullOrWhiteSpace($env:BILLS_API_DOMAIN_NAME)) { "bills-api.terraclime.com" } else { $env:BILLS_API_DOMAIN_NAME }
 $certificateArn = $env:BILLS_API_CERTIFICATE_ARN
@@ -91,9 +92,12 @@ $parameterOverrides = @(
   ('AwsRegion="{0}"' -f $region)
   'UsersTable="UserCredentials"'
   'FlowTable="flow_data"'
+  'DeviceTable="device_data"'
   'ApartmentTable="apartment_data"'
   'TariffTable="tariff_configs"'
   'LeaksTable="leak_data"'
+  'FinalizationsTable="billing_finalizations"'
+  ('ApartmentTimeZone="{0}"' -f $apartmentTimeZone)
   ('CustomDomainName="{0}"' -f $customDomainName)
   ('CertificateArn="{0}"' -f $certificateArn)
 )

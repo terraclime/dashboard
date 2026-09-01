@@ -65,8 +65,10 @@ Live bill delivery expects these DynamoDB table defaults:
 - `APARTMENT_TABLE=apartment_data`
 - `USERS_TABLE=UserCredentials`
 - `FLOW_TABLE=flow_data`
+- `DEVICE_TABLE=device_data`
 - `LEAKS_TABLE=leak_data`
 - `TARIFF_TABLE=tariff_configs`
+- `FINALIZATIONS_TABLE=billing_finalizations`
 
 The old `billing_cycles` table is treated as a legacy optional source only when
 `BILLING_TABLE` is explicitly set. Current tariffs are read from
@@ -86,6 +88,15 @@ service uses it to find flats inside that apartment, then sends to
 `resident_email` from apartment flat metadata or `user_mail` from
 `UserCredentials` when the flat metadata has no email.
 
+The bill email takes its payment destination and inlet layout from the
+apartment data. Store the RWA payment fields on the apartment (or its tariff
+record) as `rwa_name`, `rwa_account_name`, `rwa_bank`, `rwa_account_number`,
+and `rwa_ifsc`. A nested `rwa_bank_account` object with `bank`, `account_name`,
+`account_number`, and `ifsc` is also supported. Each flat's `devices` array
+should include `device_id`, `inlet` (the location shown in the bill), and
+`status`; equivalent rows in `device_data` are also supported. The current-cycle
+table then creates one column per configured inlet.
+
 To send directly by email for the current billing cycle:
 
 ```powershell
@@ -98,6 +109,13 @@ Invoke-RestMethod `
 
 `cycleId` is optional for this endpoint. When omitted, the service uses the
 apartment's configured current billing cycle.
+
+Tenant final billing uses an inclusive calendar-date cutoff. Preview the
+authoritative amount with `GET /api/bills/finalization-preview/:flatId`, then
+persist and send it with `POST /api/bills/finalize/:flatId`. Both calls require
+`apartment_id`, `cycleId`, and `cutoff_date` (`YYYY-MM-DD`). A finalization is
+immutable and idempotent; if delivery fails, retry the saved snapshot with
+`POST /api/bills/finalizations/:finalizationId/retry-email`.
 
 ## Build and deploy
 

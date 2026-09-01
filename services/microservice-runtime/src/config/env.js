@@ -20,6 +20,7 @@ export const appConfig = {
     billing: process.env.BILLING_TABLE || "tariff_configs",
     leaks: process.env.LEAKS_TABLE || "leak_data",
     tariffs: process.env.TARIFF_TABLE || "tariff_configs",
+    finalizations: process.env.FINALIZATIONS_TABLE || "billing_finalizations",
     prepaid: process.env.PREPAID_TABLE || "prepaid_zones",
   },
 };

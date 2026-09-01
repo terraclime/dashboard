@@ -33,6 +33,12 @@ Parameters:
   LeaksTable:
     Type: String
     Default: leak_data
+  FinalizationsTable:
+    Type: String
+    Default: billing_finalizations
+  ApartmentTimeZone:
+    Type: String
+    Default: Asia/Kolkata
   CustomDomainName:
     Type: String
     Default: billing-api.terraclime.com
@@ -59,6 +65,8 @@ Globals:
         APARTMENT_TABLE: !Ref ApartmentTable
         BILLING_TABLE: !Ref BillingTable
         LEAKS_TABLE: !Ref LeaksTable
+        FINALIZATIONS_TABLE: !Ref FinalizationsTable
+        APARTMENT_TIME_ZONE: !Ref ApartmentTimeZone
 
 Resources:
   BillingApiGateway:
@@ -98,6 +106,8 @@ Resources:
                 - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${BillingTable}/index/*
                 - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LeaksTable}
                 - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LeaksTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${FinalizationsTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${FinalizationsTable}/index/*
       Events:
         RootRoute:
           Type: Api

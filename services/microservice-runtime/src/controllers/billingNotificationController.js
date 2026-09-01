@@ -5,7 +5,6 @@ import {
   getFlatById,
   getFlatByEmail,
   getReadingsForFlat,
-  getReadingsForCycle,
 } from "../services/dynamo.service.js";
 
 import {
@@ -19,13 +18,19 @@ import {
 } from "../services/jobStore.service.js";
 
 import { sendBillMail, generateBillHTML } from "../mailer/mailer.js";
+import {
+  createFinalization,
+  getFinalization,
+  listFinalizations,
+  updateFinalizationEmail,
+} from "../services/billingFinalization.service.js";
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 /**
  * Assemble the billData object expected by generateBillHTML / sendBillMail.
  */
-function buildBillData({ flat, readings, cycle, billId }) {
+export function buildBillData({ flat, readings, cycle, billId }) {
   const today = new Date();
   const issue_date = today.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 
@@ -48,20 +53,153 @@ function buildBillData({ flat, readings, cycle, billId }) {
     inlet_num: flat.inletCount ?? 5,
     inst_num: flat.installedMeters ?? 5,
     active_num: flat.activeMeters ?? 5,
-    inlets: readings.inlets ?? {},
+    inlet_readings: readings.inletReadings ?? [],
     tariff_per_kl: cycle.tariffPerKL,
     leakage: readings.leakage ?? {},
     leakage_penalty_per_l: cycle.leakagePenaltyPerL ?? 0,
-    prev_consumed: readings.prevConsumed ?? 0,
-    prev_charges: readings.prevCharges ?? 0,
+    prev_consumed: readings.prevConsumed ?? null,
+    prev_charges: readings.prevCharges ?? null,
     total_amount_due: null,                        // auto-calculated in template
     society_legal_name: cycle.societyInfo?.legalName ?? "Society",
-    app_name: cycle.societyInfo?.appName ?? "MyGate",
     society_bank: cycle.societyInfo?.bank ?? "",
     society_acc_no: cycle.societyInfo?.accNo ?? "",
     society_ifsc: cycle.societyInfo?.ifsc ?? "",
+    society_acc_name: cycle.societyInfo?.accountName ?? "",
   };
 }
+
+const normalizeEmail = (value) => String(value ?? "").trim().toLowerCase();
+const normalizeDate = (value) => {
+  const text = String(value ?? "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return "";
+  const parsed = new Date(`${text}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === text ? text : "";
+};
+const addDays = (isoDate, days) => {
+  const date = new Date(`${isoDate}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+};
+const getTodayInBillingTimezone = () => {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+    timeZone: process.env.APARTMENT_TIME_ZONE || "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date()).filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+};
+
+const summarizeBill = (billData) => {
+  const inletReadings = billData.inlet_readings || [];
+  const consumptionLitres = inletReadings.reduce(
+    (sum, reading) => sum + Number(reading.consumed || 0),
+    0
+  );
+  const leakageLitres = inletReadings.reduce(
+    (sum, reading) => sum + Number(reading.leaked || 0),
+    0
+  );
+  const waterCharge = Number(
+    ((consumptionLitres / 1000) * Number(billData.tariff_per_kl || 0)).toFixed(2)
+  );
+  const leakageCharge = Number(
+    (leakageLitres * Number(billData.leakage_penalty_per_l || 0)).toFixed(2)
+  );
+
+  return {
+    consumption_litres: Math.round(consumptionLitres),
+    leakage_litres: Math.round(leakageLitres),
+    water_charge: waterCharge,
+    leakage_charge: leakageCharge,
+    total_amount: Number((waterCharge + leakageCharge).toFixed(2)),
+  };
+};
+
+const validateFinalizationInput = ({ apartmentId, cycle, cutoffDate }) => {
+  if (!apartmentId) throw Object.assign(new Error("apartment_id is required"), { statusCode: 400 });
+  if (!cutoffDate) throw Object.assign(new Error("cutoff_date must be YYYY-MM-DD"), { statusCode: 400 });
+  if (!cycle?.startDate || !cycle?.endDate) {
+    throw Object.assign(new Error("Billing cycle dates are unavailable"), { statusCode: 422 });
+  }
+  if (cutoffDate < cycle.startDate || cutoffDate > cycle.endDate) {
+    throw Object.assign(
+      new Error(`cutoff_date must be between ${cycle.startDate} and ${cycle.endDate}`),
+      { statusCode: 422 }
+    );
+  }
+  if (cutoffDate > getTodayInBillingTimezone()) {
+    throw Object.assign(new Error("cutoff_date cannot be in the future"), { statusCode: 422 });
+  }
+};
+
+export async function buildFinalizationPreview({ apartmentId, flatId, cycleId, cutoffDate }) {
+  if (!cycleId) throw Object.assign(new Error("cycleId is required"), { statusCode: 400 });
+  const normalizedCutoff = normalizeDate(cutoffDate);
+  const [flat, cycle] = await Promise.all([
+    getFlatById(flatId, apartmentId),
+    getBillingCycle(cycleId, apartmentId),
+  ]);
+  if (!flat.email) {
+    throw Object.assign(new Error(`Flat ${flatId} has no registered email`), { statusCode: 422 });
+  }
+
+  const finalizations = await listFinalizations(apartmentId, cycle.startDate);
+  const periodStart = getResidentPeriodStart(finalizations, flat, cycle.startDate);
+  const residentCycle = { ...cycle, startDate: periodStart };
+  validateFinalizationInput({ apartmentId, cycle: residentCycle, cutoffDate: normalizedCutoff });
+
+  const readings = await getReadingsForFlat(flatId, cycle.cycleId, apartmentId, {
+    periodStart,
+    periodEnd: normalizedCutoff,
+  });
+  if (!readings.hasReadings) {
+    throw Object.assign(
+      new Error(`No meter readings were found for flat ${flatId} in the selected period`),
+      { statusCode: 422 }
+    );
+  }
+  const billId = `FINAL-${cycle.cycleId}-${flatId}`;
+  const finalCycle = { ...cycle, startDate: periodStart, endDate: normalizedCutoff };
+  const billData = buildBillData({ flat, readings, cycle: finalCycle, billId });
+
+  return {
+    apartmentId,
+    flatId: flat.flatId,
+    cycleId: cycle.cycleId,
+    cycleKey: cycle.startDate,
+    residentName: flat.residentName,
+    residentEmail: flat.email,
+    flatNumber: flat.flatNo || flat.flatId,
+    block: flat.block || "",
+    periodStart,
+    periodEnd: normalizedCutoff,
+    tariffPerKL: cycle.tariffPerKL,
+    leakagePenaltyPerL: cycle.leakagePenaltyPerL || 0,
+    ...summarizeBill(billData),
+    inlet_readings: readings.inletReadings || [],
+    bill_data: billData,
+  };
+}
+
+const matchingFinalization = (finalizations, flat) =>
+  finalizations.find(
+    (item) =>
+      String(item.flatId).toLowerCase() === String(flat.flatId).toLowerCase() &&
+      normalizeEmail(item.residentEmail) === normalizeEmail(flat.email)
+  );
+
+const getResidentPeriodStart = (finalizations, flat, cycleStart) => {
+  const latestOtherResident = finalizations
+    .filter(
+      (item) =>
+        String(item.flatId).toLowerCase() === String(flat.flatId).toLowerCase() &&
+        normalizeEmail(item.residentEmail) !== normalizeEmail(flat.email)
+    )
+    .sort((left, right) => String(left.periodEnd).localeCompare(String(right.periodEnd)))
+    .at(-1);
+  return latestOtherResident ? addDays(latestOtherResident.periodEnd, 1) : cycleStart;
+};
 
 /** Sequential send with concurrency limit to avoid SMTP rate-limits */
 async function sendWithConcurrency(tasks, concurrency = 5) {
@@ -99,13 +237,15 @@ export async function sendBulkBills(req, res) {
     return res.status(400).json({ success: false, message: "cycleId is required" });
   }
 
-  let cycle, flats;
+  let cycle, flats, finalizations;
 
   try {
     [cycle, flats] = await Promise.all([
       getBillingCycle(cycleId, apartmentId),
       getAllActiveFlats(apartmentId),
     ]);
+    finalizations = await listFinalizations(apartmentId, cycle.startDate);
+    flats = flats.filter((flat) => !matchingFinalization(finalizations, flat));
     if (requestedFlatIds.size) {
       flats = flats.filter((flat) => requestedFlatIds.has(String(flat.flatId).toLowerCase()));
     }
@@ -131,19 +271,20 @@ export async function sendBulkBills(req, res) {
 
   (async () => {
     try {
-      // Batch-fetch all readings
-      const flatIds = flats.map(f => f.flatId);
-      const readings = await getReadingsForCycle(cycleId, flatIds, apartmentId);
-
-      const tasks = flats.map((flat, idx) => async () => {
-        const flatReadings = readings[flat.flatId];
-        if (!flatReadings) {
-          recordMailError(jobId, flat.flatId, flat.email, "No readings found");
-          return;
-        }
+      const tasks = flats.map((flat) => async () => {
+        const periodStart = getResidentPeriodStart(finalizations, flat, cycle.startDate);
+        const flatReadings = await getReadingsForFlat(flat.flatId, cycle.cycleId, apartmentId, {
+          periodStart,
+          periodEnd: cycle.endDate,
+        });
 
         const billId = `${cycleId}-${flat.flatId}`;
-        const billData = buildBillData({ flat, readings: flatReadings, cycle, billId });
+        const billData = buildBillData({
+          flat,
+          readings: flatReadings,
+          cycle: { ...cycle, startDate: periodStart },
+          billId,
+        });
 
         try {
           await sendBillMail(flat.email, billData);
@@ -176,18 +317,28 @@ export async function sendFlatBill(req, res) {
   }
 
   try {
-    const [flat, cycle, readings] = await Promise.all([
+    const [flat, cycle] = await Promise.all([
       getFlatById(flatId, apartmentId),
       getBillingCycle(cycleId, apartmentId),
-      getReadingsForFlat(flatId, cycleId, apartmentId),
     ]);
+    const finalizations = await listFinalizations(apartmentId, cycle.startDate);
+
+    if (matchingFinalization(finalizations, flat)) {
+      return res.status(409).json({ success: false, message: `Flat ${flatId}'s current resident is finalized` });
+    }
 
     if (!flat.email) {
       return res.status(422).json({ success: false, message: `Flat ${flatId} has no registered email` });
     }
 
+    const periodStart = getResidentPeriodStart(finalizations, flat, cycle.startDate);
+    const readings = await getReadingsForFlat(flatId, cycleId, apartmentId, {
+      periodStart,
+      periodEnd: cycle.endDate,
+    });
+
     const billId = `${cycleId}-${flatId}`;
-    const billData = buildBillData({ flat, readings, cycle, billId });
+    const billData = buildBillData({ flat, readings, cycle: { ...cycle, startDate: periodStart }, billId });
 
     const info = await sendBillMail(flat.email, billData);
 
@@ -218,9 +369,17 @@ export async function sendBillByEmail(req, res) {
     const cycle = cycleId
       ? await getBillingCycle(cycleId, apartmentId)
       : await getCurrentBillingCycle(apartmentId);
-    const readings = await getReadingsForFlat(flat.flatId, cycle.cycleId, apartmentId);
+    const finalizations = await listFinalizations(apartmentId, cycle.startDate);
+    if (matchingFinalization(finalizations, flat)) {
+      return res.status(409).json({ success: false, message: `Flat ${flat.flatId}'s current resident is finalized` });
+    }
+    const periodStart = getResidentPeriodStart(finalizations, flat, cycle.startDate);
+    const readings = await getReadingsForFlat(flat.flatId, cycle.cycleId, apartmentId, {
+      periodStart,
+      periodEnd: cycle.endDate,
+    });
     const billId = `${cycle.cycleId}-${flat.flatId}`;
-    const billData = buildBillData({ flat, readings, cycle, billId });
+    const billData = buildBillData({ flat, readings, cycle: { ...cycle, startDate: periodStart }, billId });
     const info = await sendBillMail(flat.email, billData);
 
     return res.json({
@@ -234,6 +393,101 @@ export async function sendBillByEmail(req, res) {
   } catch (err) {
     console.error(`[sendBillByEmail] ${email}:`, err);
     return res.status(500).json({ success: false, message: err.message });
+  }
+}
+
+export async function previewFinalization(req, res) {
+  const { flatId } = req.params;
+  const { apartment_id, apartmentId = apartment_id, cycleId, cutoff_date } = req.query;
+
+  try {
+    const preview = await buildFinalizationPreview({
+      apartmentId,
+      flatId,
+      cycleId,
+      cutoffDate: cutoff_date,
+    });
+    const existing = matchingFinalization(
+      await listFinalizations(apartmentId, preview.cycleKey),
+      { flatId: preview.flatId, email: preview.residentEmail }
+    );
+    return res.json({ success: true, preview, existing_finalization: existing || null });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
+  }
+}
+
+export async function finalizeTenantBill(req, res) {
+  const { flatId } = req.params;
+  const { apartment_id, apartmentId = apartment_id, cycleId, cutoff_date } = req.body || {};
+
+  try {
+    const preview = await buildFinalizationPreview({
+      apartmentId,
+      flatId,
+      cycleId,
+      cutoffDate: cutoff_date,
+    });
+    const { item, created } = await createFinalization(preview);
+
+    if (!created) {
+      return res.status(409).json({
+        success: false,
+        finalization: item,
+        message: "This resident has already been finalized for the billing cycle.",
+      });
+    }
+
+    try {
+      const info = await sendBillMail(item.residentEmail, item.bill_data);
+      const finalization = await updateFinalizationEmail(item.finalization_id, "sent", {
+        messageId: info.messageId,
+      });
+      return res.status(201).json({
+        success: true,
+        finalization,
+        message: `Final bill sent to ${item.residentEmail}`,
+      });
+    } catch (mailError) {
+      const finalization = await updateFinalizationEmail(item.finalization_id, "failed", {
+        emailError: mailError.message,
+      });
+      return res.status(502).json({
+        success: false,
+        finalized: true,
+        finalization,
+        message: "Tenant billing was finalized, but the email could not be sent.",
+      });
+    }
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
+  }
+}
+
+export async function retryFinalizationEmail(req, res) {
+  try {
+    const finalization = await getFinalization(req.params.finalizationId);
+    if (!finalization) {
+      return res.status(404).json({ success: false, message: "Finalization not found" });
+    }
+    if (finalization.email_status === "sent") {
+      return res.status(409).json({ success: false, finalization, message: "Final bill email was already sent." });
+    }
+
+    try {
+      const info = await sendBillMail(finalization.residentEmail, finalization.bill_data);
+      const updated = await updateFinalizationEmail(finalization.finalization_id, "sent", {
+        messageId: info.messageId,
+      });
+      return res.json({ success: true, finalization: updated, message: `Final bill sent to ${updated.residentEmail}` });
+    } catch (mailError) {
+      const updated = await updateFinalizationEmail(finalization.finalization_id, "failed", {
+        emailError: mailError.message,
+      });
+      return res.status(502).json({ success: false, finalization: updated, message: "Email retry failed." });
+    }
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
   }
 }
 

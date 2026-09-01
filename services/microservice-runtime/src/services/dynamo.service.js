@@ -4,6 +4,7 @@ import {
   buildDateRange,
   getItemByKey,
   normalizeIsoDate,
+  normalizeIsoDateInTimezone,
   scanAllItems,
   scanItemsByAttribute,
   sortByIsoDate,
@@ -12,11 +13,11 @@ import {
 } from "./dynamoUtils.service.js";
 
 const DEFAULT_SOCIETY_INFO = {
-  legalName: "Terraclime Residents Association",
-  appName: "Terraclime",
+  legalName: "Residents' Welfare Association",
   bank: "",
   accNo: "",
   ifsc: "",
+  accountName: "",
 };
 
 const normalizeKey = (value) => String(value ?? "").trim().toLowerCase();
@@ -119,10 +120,28 @@ const mapLeakBucket = (source) => {
 };
 
 const inferInlet = (device = {}) => {
-  const rawValue =
+  const explicitValue =
     device.inlet ||
+    device.inlet_location ||
+    device.inletLocation ||
+    device.meter_location ||
+    device.meterLocation ||
+    device.location ||
+    device.room_type ||
+    device.roomType ||
+    device.room_label ||
+    device.roomLabel ||
     device.source ||
-    (typeof device.device_id === "string" ? device.device_id.split("-").at(-1) : "");
+    device.zone;
+
+  if (explicitValue) {
+    return String(explicitValue).trim();
+  }
+
+  const rawValue =
+    typeof (device.device_id || device.deviceId) === "string"
+      ? (device.device_id || device.deviceId).split("-").at(-1)
+      : "";
 
   const normalized = String(rawValue || "").trim().toLowerCase();
 
@@ -131,6 +150,16 @@ const inferInlet = (device = {}) => {
   if (normalized.includes("bath")) return "Bathroom";
 
   return rawValue || "Unknown";
+};
+
+const getFlowLitres = (record = {}) => {
+  const hourlyTotal = sumHourlyValues(record);
+  if (hourlyTotal) return hourlyTotal;
+
+  return toFiniteNumber(
+    record.litres ?? record.liters ?? record.consumption_litres ?? record.consumption ?? record.volume,
+    0
+  );
 };
 
 const normalizeBillingCycle = (primarySource = {}, fallbackSource = {}) => {
@@ -179,30 +208,60 @@ const normalizeBillingCycle = (primarySource = {}, fallbackSource = {}) => {
     ),
     societyInfo: {
       legalName:
+        source.rwa_name ||
+        source.rwaName ||
+        source.association_name ||
+        source.associationName ||
         source.society_legal_name ||
         source.societyLegalName ||
+        source.society_name ||
+        source.societyName ||
         source.societyInfo?.legalName ||
+        source.apartment_name ||
+        source.apartmentName ||
         DEFAULT_SOCIETY_INFO.legalName,
-      appName:
-        source.app_name ||
-        source.appName ||
-        source.societyInfo?.appName ||
-        DEFAULT_SOCIETY_INFO.appName,
       bank:
+        source.rwa_bank ||
+        source.rwaBank ||
         source.society_bank ||
         source.societyBank ||
+        source.rwa_bank_account?.bank ||
+        source.rwaBankAccount?.bank ||
+        source.bank_details?.bank ||
         source.societyInfo?.bank ||
         DEFAULT_SOCIETY_INFO.bank,
       accNo:
+        source.rwa_acc_no ||
+        source.rwaAccNo ||
+        source.rwa_account_number ||
+        source.rwaAccountNumber ||
         source.society_acc_no ||
         source.societyAccNo ||
+        source.rwa_bank_account?.account_number ||
+        source.rwaBankAccount?.accountNumber ||
+        source.bank_details?.account_number ||
         source.societyInfo?.accNo ||
         DEFAULT_SOCIETY_INFO.accNo,
       ifsc:
+        source.rwa_ifsc ||
+        source.rwaIfsc ||
         source.society_ifsc ||
         source.societyIfsc ||
+        source.rwa_bank_account?.ifsc ||
+        source.rwaBankAccount?.ifsc ||
+        source.bank_details?.ifsc ||
         source.societyInfo?.ifsc ||
         DEFAULT_SOCIETY_INFO.ifsc,
+      accountName:
+        source.rwa_account_name ||
+        source.rwaAccountName ||
+        source.society_account_name ||
+        source.societyAccountName ||
+        source.rwa_bank_account?.account_name ||
+        source.rwaBankAccount?.accountName ||
+        source.bank_details?.account_name ||
+        source.societyInfo?.accountName ||
+        DEFAULT_SOCIETY_INFO.accountName,
     },
   };
 };
@@ -265,7 +324,7 @@ const buildObservedDevices = (metadataDevices = [], flowRecords = [], leakEvents
 
     devices.set(deviceId, {
       device_id: deviceId,
-      inlet: device?.inlet || inferInlet(device),
+      inlet: inferInlet(device),
       status: device?.status || "inactive",
       last_seen: device?.last_seen || device?.lastSeen || null,
     });
@@ -319,7 +378,7 @@ const aggregateDailyConsumption = (flowRecords = []) => {
       return;
     }
 
-    const litres = sumHourlyValues(record);
+    const litres = getFlowLitres(record);
     dailyMap.set(date, (dailyMap.get(date) || 0) + litres);
 
     const inlet = inferInlet(record);
@@ -327,6 +386,108 @@ const aggregateDailyConsumption = (flowRecords = []) => {
   });
 
   return { dailyMap, inletMap };
+};
+
+const getDeviceId = (source = {}) => String(source.device_id || source.deviceId || "").trim();
+
+const recordMatchesFlat = (record, flatId, deviceIds, apartmentId) =>
+  recordBelongsToApartment(record, apartmentId) &&
+  (normalizeKey(getFlatId(record)) === normalizeKey(flatId) ||
+    deviceIds.has(normalizeKey(getDeviceId(record))));
+
+const makeUniqueInletLabels = (devices = []) => {
+  const totals = new Map();
+  const seen = new Map();
+
+  devices.forEach((device) => {
+    const label = inferInlet(device) || "Unknown";
+    totals.set(normalizeKey(label), (totals.get(normalizeKey(label)) || 0) + 1);
+  });
+
+  return devices.map((device, index) => {
+    const baseLabel = inferInlet(device) || `Inlet ${index + 1}`;
+    const labelKey = normalizeKey(baseLabel);
+    const occurrence = (seen.get(labelKey) || 0) + 1;
+    seen.set(labelKey, occurrence);
+
+    return {
+      deviceId: getDeviceId(device),
+      baseLabel,
+      label: totals.get(labelKey) > 1 ? `${baseLabel} ${occurrence}` : baseLabel,
+      consumed: 0,
+      leaked: 0,
+    };
+  });
+};
+
+const buildInletReadings = (devices = [], flowRecords = [], leakEvents = []) => {
+  const inferredDevices = [];
+  const knownIds = new Set();
+
+  [...devices, ...flowRecords].forEach((source) => {
+    const deviceId = getDeviceId(source);
+    if (deviceId && !knownIds.has(normalizeKey(deviceId))) {
+      knownIds.add(normalizeKey(deviceId));
+      inferredDevices.push({ ...source, device_id: deviceId, inlet: inferInlet(source) });
+    }
+  });
+
+  if (!inferredDevices.length) {
+    const knownLocations = new Set();
+    [...flowRecords, ...leakEvents].forEach((source) => {
+      const label = inferInlet(source);
+      if (label && normalizeKey(label) !== "unknown" && !knownLocations.has(normalizeKey(label))) {
+        knownLocations.add(normalizeKey(label));
+        inferredDevices.push({ inlet: label });
+      }
+    });
+  }
+
+  const readings = makeUniqueInletLabels(inferredDevices);
+  const byDeviceId = new Map(
+    readings.filter((row) => row.deviceId).map((row) => [normalizeKey(row.deviceId), row])
+  );
+  const byLocation = new Map();
+  readings.forEach((row) => {
+    const locationKey = normalizeKey(row.baseLabel);
+    if (!byLocation.has(locationKey)) byLocation.set(locationKey, row);
+  });
+
+  const findReading = (source) =>
+    byDeviceId.get(normalizeKey(getDeviceId(source))) ||
+    byLocation.get(normalizeKey(inferInlet(source)));
+
+  let unassignedConsumption = 0;
+  flowRecords.forEach((record) => {
+    const litres = getFlowLitres(record);
+    const reading = findReading(record);
+    if (reading) reading.consumed += litres;
+    else unassignedConsumption += litres;
+  });
+
+  let unassignedLeakage = 0;
+  leakEvents.forEach((event) => {
+    const litres = toFiniteNumber(event?.litres, 0);
+    const reading = findReading(event);
+    if (reading) reading.leaked += litres;
+    else unassignedLeakage += litres;
+  });
+
+  if (unassignedConsumption || unassignedLeakage) {
+    readings.push({
+      deviceId: "",
+      baseLabel: "Unassigned inlet",
+      label: "Unassigned inlet",
+      consumed: unassignedConsumption,
+      leaked: unassignedLeakage,
+    });
+  }
+
+  return readings.map(({ label, consumed, leaked }) => ({
+    label,
+    consumed: Math.round(consumed),
+    leaked: Math.round(leaked),
+  }));
 };
 
 const aggregateLeakage = (leakEvents = []) =>
@@ -345,33 +506,16 @@ const aggregateLeakage = (leakEvents = []) =>
     }
   );
 
-const buildInletDistribution = (inletMap = new Map(), totalLitres = 0) => {
-  if (inletMap.size) {
-    return {
-      kitchen: Math.round(inletMap.get("Kitchen") || 0),
-      bath1: Math.round(inletMap.get("Bathroom") || 0),
-      bath2: 0,
-      bath3: 0,
-      utility: Math.round(inletMap.get("Utility") || 0),
-    };
-  }
-
-  return {
-    kitchen: Math.round(totalLitres * 0.3),
-    bath1: Math.round(totalLitres * 0.25),
-    bath2: Math.round(totalLitres * 0.2),
-    bath3: Math.round(totalLitres * 0.15),
-    utility: Math.round(totalLitres * 0.1),
-  };
-};
-
-const buildCycleBounds = (cycle) => {
+const buildCycleBounds = (cycle, options = {}) => {
   if (!cycle?.startDate || !cycle?.endDate) {
     return null;
   }
 
+  const currentStart = normalizeIsoDate(options.periodStart) || cycle.startDate;
+  const currentEnd = normalizeIsoDate(options.periodEnd) || cycle.endDate;
+
   return {
-    current: new Set(buildDateRange(cycle.startDate, cycle.endDate)),
+    current: new Set(buildDateRange(currentStart, currentEnd)),
     previous: new Set(
       buildDateRange(
         new Date(new Date(`${cycle.startDate}T00:00:00Z`).setUTCMonth(
@@ -392,6 +536,8 @@ const buildCycleBounds = (cycle) => {
 const resolveApartmentItems = async () => scanAllItems(appConfig.tables.apartments);
 
 const resolveUsers = async () => scanAllOptional(appConfig.tables.users, "resident users");
+
+const resolveDevices = async () => scanAllOptional(appConfig.tables.devices, "meter metadata");
 
 const getBillingRecords = async () =>
   process.env.BILLING_TABLE
@@ -439,9 +585,10 @@ const getApartmentFlatRows = (apartmentItems = [], apartmentId) =>
     });
 
 const findFlatAcrossApartments = async (flatId, apartmentId) => {
-  const [apartments, users, flowRecords, leakRecords] = await Promise.all([
+  const [apartments, users, deviceRecords, flowRecords, leakRecords] = await Promise.all([
     resolveApartmentItems(),
     resolveUsers(),
+    resolveDevices(),
     getFlowRecords(),
     getLeakRecords(),
   ]);
@@ -468,17 +615,24 @@ const findFlatAcrossApartments = async (flatId, apartmentId) => {
   );
   const primaryUser = flatUsers[0] || null;
 
-  const matchingFlowRecords = flowRecords.filter(
+  const matchingDevices = deviceRecords.filter(
     (record) =>
       normalizeKey(getFlatId(record)) === normalizedFlatId &&
       recordBelongsToApartment(record, apartmentId)
   );
-  const matchingLeaks = leakRecords.filter(
-    (record) =>
-      normalizeKey(getFlatId(record)) === normalizedFlatId &&
-      recordBelongsToApartment(record, apartmentId)
+  const configuredDevices = [...(flat?.devices || []), ...matchingDevices];
+  const deviceIds = new Set(configuredDevices.map(getDeviceId).map(normalizeKey).filter(Boolean));
+  const matchingFlowRecords = flowRecords.filter((record) =>
+    recordMatchesFlat(record, flatId, deviceIds, apartmentId)
   );
-  const devices = buildObservedDevices(flat?.devices, matchingFlowRecords, matchingLeaks);
+  const matchingLeaks = leakRecords.filter((record) =>
+    recordMatchesFlat(record, flatId, deviceIds, apartmentId)
+  );
+  const devices = buildObservedDevices(
+    configuredDevices,
+    matchingFlowRecords,
+    matchingLeaks
+  );
 
   return {
     apartment,
@@ -516,10 +670,10 @@ function demoCycle() {
     leakagePenaltyPerL: 0.5,
     societyInfo: {
       legalName: "Sobha Lakeview Residents Association",
-      appName: "MyGate",
       bank: "HDFC Bank",
       accNo: "XXXX1234567",
       ifsc: "HDFC0001234",
+      accountName: "Sobha Lakeview Residents Association",
     },
   };
 }
@@ -537,8 +691,34 @@ function demoFlats() {
   }));
 }
 
-function demoReadingsForFlat(flat) {
-  const totalLitres = flat.daily_consumption.reduce((sum, d) => sum + d.litres, 0);
+function demoReadingsForFlat(flat, options = {}) {
+  const includedDates = options.periodStart && options.periodEnd
+    ? new Set(buildDateRange(options.periodStart, options.periodEnd))
+    : null;
+  const dailyConsumption = includedDates
+    ? flat.daily_consumption.filter((entry) => includedDates.has(normalizeIsoDate(entry.date)))
+    : flat.daily_consumption;
+  const leakEvents = includedDates
+    ? (flat.leak_events || []).filter((event) =>
+        includedDates.has(normalizeIsoDate(event.timestamp || event.date))
+      )
+    : (flat.leak_events || []);
+  const totalLitres = dailyConsumption.reduce((sum, d) => sum + d.litres, 0);
+  const devices = flat.devices || [];
+  const baseShare = devices.length ? Math.floor(totalLitres / devices.length) : 0;
+  let allocated = 0;
+  const inletReadings = devices.map((device, index) => {
+    const consumed = index === devices.length - 1 ? totalLitres - allocated : baseShare;
+    allocated += consumed;
+    const inlet = inferInlet(device);
+    const leaked =
+      leakEvents
+        .filter((event) => normalizeKey(inferInlet(event)) === normalizeKey(inlet))
+        .reduce((sum, event) => sum + toFiniteNumber(event.litres, 0), 0) ?? 0;
+
+    return { label: inlet, consumed, leaked };
+  });
+
   return {
     inlets: {
       kitchen: Math.round(totalLitres * 0.3),
@@ -549,24 +729,24 @@ function demoReadingsForFlat(flat) {
     },
     leakage: {
       kitchen:
-        flat.leak_events
-          ?.filter((event) => event.source === "Kitchen")
+        leakEvents
+          .filter((event) => event.source === "Kitchen")
           .reduce((sum, event) => sum + event.litres, 0) ?? 0,
       bath1:
-        flat.leak_events
-          ?.filter((event) => event.source === "Bathroom")
+        leakEvents
+          .filter((event) => event.source === "Bathroom")
           .reduce((sum, event) => sum + event.litres, 0) ?? 0,
       bath2: 0,
       bath3: 0,
       utility:
-        flat.leak_events
-          ?.filter((event) => event.source === "Utility")
+        leakEvents
+          .filter((event) => event.source === "Utility")
           .reduce((sum, event) => sum + event.litres, 0) ?? 0,
     },
-    prevConsumed: Math.round(totalLitres * 0.94),
-    prevCharges: Math.round(
-      ((totalLitres * 0.94) / 1000) * demoApartment.billing_cycle.tariff_per_kl
-    ),
+    inletReadings,
+    hasReadings: dailyConsumption.length > 0,
+    prevConsumed: null,
+    prevCharges: null,
   };
 }
 
@@ -577,6 +757,7 @@ export async function getBillingCycle(cycleId, apartmentId) {
 
   const tariffRecord = await getTariffRecord(apartmentId, cycleId);
   const apartments = await resolveApartmentItems();
+  const apartmentInfo = apartments.find((record) => apartmentMatches(record, apartmentId));
   const apartmentMatch = apartments.find(
     (record) =>
       apartmentMatches(record, apartmentId) &&
@@ -584,12 +765,12 @@ export async function getBillingCycle(cycleId, apartmentId) {
   );
 
   if (apartmentMatch) {
-    const cycle = normalizeBillingCycle(apartmentMatch?.billing_cycle || apartmentMatch, {});
+    const cycle = normalizeBillingCycle(apartmentMatch?.billing_cycle || apartmentMatch, apartmentMatch);
     return mergeCycleWithTariff(cycle, tariffRecord);
   }
 
   if (tariffRecord) {
-    return normalizeBillingCycle(tariffRecord, {});
+    return normalizeBillingCycle(tariffRecord, apartmentInfo || {});
   }
 
   const billingRecords = await getBillingRecords();
@@ -598,7 +779,7 @@ export async function getBillingCycle(cycleId, apartmentId) {
   );
 
   if (matchingRecord) {
-    return normalizeBillingCycle(matchingRecord, {});
+    return normalizeBillingCycle(matchingRecord, apartmentInfo || {});
   }
 
   throw new Error(`Billing cycle ${cycleId} not found`);
@@ -618,7 +799,7 @@ export async function getCurrentBillingCycle(apartmentId) {
 
   const tariffCycles = (await getTariffRecords())
     .filter((record) => apartmentMatches(record, apartmentId))
-    .map((record) => normalizeBillingCycle(record, {}))
+    .map((record) => normalizeBillingCycle(record, apartment || {}))
     .filter((cycle) => cycle.startDate);
 
   const latestTariffCycle = tariffCycles.sort((left, right) =>
@@ -631,7 +812,7 @@ export async function getCurrentBillingCycle(apartmentId) {
 
   const billingRecords = (await getBillingRecords())
     .filter((record) => recordBelongsToApartment(record, apartmentId))
-    .map((record) => normalizeBillingCycle(record, {}))
+    .map((record) => normalizeBillingCycle(record, apartment || {}))
     .filter((cycle) => cycle.startDate);
 
   const latestCycle = billingRecords.sort((left, right) =>
@@ -654,9 +835,10 @@ export async function getAllActiveFlats(apartmentId) {
     return demoFlats().filter((flat) => flat.email);
   }
 
-  const [apartments, users, flowRecords, leakRecords] = await Promise.all([
+  const [apartments, users, deviceRecords, flowRecords, leakRecords] = await Promise.all([
     resolveApartmentItems(),
     resolveUsers(),
+    resolveDevices(),
     getFlowRecords(),
     getLeakRecords(),
   ]);
@@ -677,18 +859,19 @@ export async function getAllActiveFlats(apartmentId) {
   return getApartmentFlatRows(apartments, apartmentId)
     .map(({ flat }) => {
       const flatId = String(getFlatId(flat));
-      const devices = buildObservedDevices(
-        flat.devices,
-        flowRecords.filter(
+      const configuredDevices = [
+        ...(flat.devices || []),
+        ...deviceRecords.filter(
           (record) =>
             normalizeKey(getFlatId(record)) === normalizeKey(flatId) &&
             recordBelongsToApartment(record, apartmentId)
         ),
-        leakRecords.filter(
-          (record) =>
-            normalizeKey(getFlatId(record)) === normalizeKey(flatId) &&
-            recordBelongsToApartment(record, apartmentId)
-        )
+      ];
+      const deviceIds = new Set(configuredDevices.map(getDeviceId).map(normalizeKey).filter(Boolean));
+      const devices = buildObservedDevices(
+        configuredDevices,
+        flowRecords.filter((record) => recordMatchesFlat(record, flatId, deviceIds, apartmentId)),
+        leakRecords.filter((record) => recordMatchesFlat(record, flatId, deviceIds, apartmentId))
       );
 
       return buildFlatInfo({
@@ -776,11 +959,11 @@ export async function getFlatByEmail(email, apartmentId) {
   );
 }
 
-export async function getReadingsForFlat(flatId, cycleId, apartmentId) {
+export async function getReadingsForFlat(flatId, cycleId, apartmentId, options = {}) {
   if (appConfig.demoMode) {
     const rawFlat = demoApartment.flats.find((flat) => flat.flat_id === flatId);
     if (!rawFlat) throw new Error(`Flat ${flatId} not found`);
-    return demoReadingsForFlat(rawFlat);
+    return demoReadingsForFlat(rawFlat, options);
   }
 
   const [cycle, flatResult] = await Promise.all([
@@ -788,38 +971,40 @@ export async function getReadingsForFlat(flatId, cycleId, apartmentId) {
     findFlatAcrossApartments(flatId, apartmentId),
   ]);
 
-  const bounds = buildCycleBounds(cycle);
+  const bounds = buildCycleBounds(cycle, options);
   const currentFlow = bounds
     ? flatResult.flowRecords.filter((record) =>
-        bounds.current.has(normalizeIsoDate(record?.timestamp || record?.date))
+        bounds.current.has(normalizeIsoDateInTimezone(record?.timestamp || record?.date))
       )
     : flatResult.flowRecords;
   const previousFlow = bounds
     ? flatResult.flowRecords.filter((record) =>
-        bounds.previous.has(normalizeIsoDate(record?.timestamp || record?.date))
+        bounds.previous.has(normalizeIsoDateInTimezone(record?.timestamp || record?.date))
       )
     : [];
 
   const currentLeaks = bounds
     ? flatResult.leakEvents.filter((event) =>
-        bounds.current.has(normalizeIsoDate(event?.timestamp || event?.date))
+        bounds.current.has(normalizeIsoDateInTimezone(event?.timestamp || event?.date))
       )
     : flatResult.leakEvents;
 
-  const { dailyMap, inletMap } = aggregateDailyConsumption(currentFlow);
+  const { dailyMap } = aggregateDailyConsumption(currentFlow);
   const totalLitres = Array.from(dailyMap.values()).reduce((sum, litres) => sum + litres, 0);
   const previousConsumption = previousFlow.reduce(
-    (sum, record) => sum + sumHourlyValues(record),
+    (sum, record) => sum + getFlowLitres(record),
     0
   );
+  const hasPreviousReadings = previousFlow.length > 0;
 
   return {
-    inlets: buildInletDistribution(inletMap, totalLitres),
     leakage: aggregateLeakage(currentLeaks),
-    prevConsumed: previousConsumption || Math.round(totalLitres * 0.94),
-    prevCharges: Math.round(
-      ((previousConsumption || Math.round(totalLitres * 0.94)) / 1000) * cycle.tariffPerKL
-    ),
+    inletReadings: buildInletReadings(flatResult.devices, currentFlow, currentLeaks),
+    hasReadings: currentFlow.length > 0,
+    prevConsumed: hasPreviousReadings ? previousConsumption : null,
+    prevCharges: hasPreviousReadings
+      ? Math.round((previousConsumption / 1000) * cycle.tariffPerKL)
+      : null,
   };
 }
 

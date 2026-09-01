@@ -108,6 +108,28 @@ export const normalizeIsoDate = (value) => {
   return date.toISOString().slice(0, 10);
 };
 
+export const normalizeIsoDateInTimezone = (
+  value,
+  timeZone = process.env.APARTMENT_TIME_ZONE || "Asia/Kolkata"
+) => {
+  const normalized = normalizeIsoDate(value);
+  if (!normalized || /^\d{4}-\d{2}-\d{2}$/.test(String(value).trim())) return normalized;
+
+  const date = new Date(value);
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    })
+      .formatToParts(date)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value])
+  );
+  return `${parts.year}-${parts.month}-${parts.day}`;
+};
+
 export const sortByIsoDate = (left, right) =>
   new Date(left).getTime() - new Date(right).getTime();
 

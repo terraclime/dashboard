@@ -2,12 +2,14 @@ import { appConfig } from "../config/env.js";
 import { demoApartment, demoBilling } from "../data/demoData.js";
 import {
   normalizeIsoDate,
+  normalizeIsoDateInTimezone,
   scanAllItems,
   scanItemsByAttribute,
   sortByIsoDate,
   sumHourlyValues,
   toFiniteNumber,
 } from "./dynamoUtils.service.js";
+import { listFinalizations } from "./billingFinalization.service.js";
 
 const APARTMENT_ID_FIELDS = ["apartment_id", "apartmentId"];
 const DEVICE_ID_FIELDS = ["device_id", "deviceId", "meter_id", "meterId", "sensor_id", "sensorId"];
@@ -35,6 +37,11 @@ const normalizeTimestamp = (source) =>
   normalizeText(getFirstValue(source, ["timestamp", "created_at", "createdAt", "time", "date"]));
 const uniqueKeys = (...values) =>
   Array.from(new Set(values.map(normalizeText).filter(Boolean)));
+const addDays = (isoDate, days) => {
+  const date = new Date(`${isoDate}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+};
 
 const toIsoDate = (date) => date.toISOString().slice(0, 10);
 
@@ -72,9 +79,6 @@ const getRequestedCycle = ({ periodStart, periodEnd } = {}) => {
     period_end: end,
   };
 };
-
-const isWithinCycle = (date, cycle) =>
-  Boolean(date && cycle?.period_start && cycle?.period_end && date >= cycle.period_start && date <= cycle.period_end);
 
 const inferBlockFromFlatNumber = (flatNumber) => {
   const match = normalizeText(flatNumber).match(/^[A-Za-z]+/);
@@ -469,15 +473,43 @@ const ensureFlat = (flatsByKey, flatId, source = {}) => {
   return flat;
 };
 
-const buildConsumptionByFlat = ({ flowRecords = [], flatsByKey, deviceToFlat, requestedCycle }) => {
+const buildOccupancyWindows = ({ flatsByKey, finalizations = [], requestedCycle }) => {
+  const windows = new Map();
+
+  getUniqueFlats(flatsByKey).forEach((flat) => {
+    const flatFinalizations = finalizations
+      .filter((item) => keyFor(item.flatId) === keyFor(flat.flat_id))
+      .sort((left, right) => normalizeText(left.periodEnd).localeCompare(normalizeText(right.periodEnd)));
+    const matchingResident = [...flatFinalizations]
+      .reverse()
+      .find((item) => keyFor(item.residentEmail) === keyFor(flat.resident_email));
+    const latestPrior = flatFinalizations.at(-1);
+
+    windows.set(keyFor(flat.flat_id), matchingResident
+      ? {
+          start: requestedCycle.period_start,
+          end: matchingResident.periodEnd,
+          status: "finalized",
+          finalization: matchingResident,
+        }
+      : {
+          start: latestPrior
+            ? [requestedCycle.period_start, addDays(latestPrior.periodEnd, 1)].sort().at(-1)
+            : requestedCycle.period_start,
+          end: requestedCycle.period_end,
+          status: "open",
+          finalization: null,
+        });
+  });
+
+  return windows;
+};
+
+const buildConsumptionByFlat = ({ flowRecords = [], flatsByKey, deviceToFlat, requestedCycle, occupancyWindows }) => {
   const consumptionByFlat = new Map();
 
   flowRecords.forEach((record) => {
-    const date = normalizeIsoDate(normalizeTimestamp(record));
-    if (!isWithinCycle(date, requestedCycle)) {
-      return;
-    }
-
+    const date = normalizeIsoDateInTimezone(normalizeTimestamp(record));
     const deviceId = normalizeDeviceId(record);
     const recordFlatId = normalizeFlatId(record) || normalizeFlatNumber(record);
     const flatKey = keyFor(recordFlatId) || (deviceId ? deviceToFlat.get(deviceId) : "");
@@ -488,6 +520,11 @@ const buildConsumptionByFlat = ({ flowRecords = [], flatsByKey, deviceToFlat, re
 
     const flat = flatsByKey.get(flatKey) || ensureFlat(flatsByKey, recordFlatId, record);
     const summaryKey = keyFor(flat.flat_id);
+    const window = occupancyWindows.get(summaryKey) || {
+      start: requestedCycle.period_start,
+      end: requestedCycle.period_end,
+    };
+    if (!date || date < window.start || date > window.end) return;
     consumptionByFlat.set(summaryKey, (consumptionByFlat.get(summaryKey) || 0) + sumFlowConsumption(record));
   });
 
@@ -497,8 +534,12 @@ const buildConsumptionByFlat = ({ flowRecords = [], flatsByKey, deviceToFlat, re
       return;
     }
 
+    const window = occupancyWindows.get(flatKey) || {
+      start: requestedCycle.period_start,
+      end: requestedCycle.period_end,
+    };
     const fallbackTotal = flat.daily_consumption
-      .filter((entry) => isWithinCycle(entry.date, requestedCycle))
+      .filter((entry) => entry.date >= window.start && entry.date <= window.end)
       .reduce((sum, entry) => sum + toFiniteNumber(entry.litres, 0), 0);
 
     if (fallbackTotal) {
@@ -509,7 +550,7 @@ const buildConsumptionByFlat = ({ flowRecords = [], flatsByKey, deviceToFlat, re
   return consumptionByFlat;
 };
 
-const applyBillingRecordFallback = ({ billingRecord, flatsByKey, consumptionByFlat }) => {
+const applyBillingRecordFallback = ({ billingRecord, flatsByKey, consumptionByFlat, occupancyWindows, requestedCycle }) => {
   const perFlat = billingRecord?.per_flat_summary || billingRecord?.per_flat || billingRecord?.flats || [];
 
   if (!Array.isArray(perFlat)) {
@@ -524,8 +565,9 @@ const applyBillingRecordFallback = ({ billingRecord, flatsByKey, consumptionByFl
 
     const flat = ensureFlat(flatsByKey, flatId, entry);
     const flatKey = keyFor(flat.flat_id);
+    const window = occupancyWindows.get(flatKey);
 
-    if (!consumptionByFlat.has(flatKey)) {
+    if (!consumptionByFlat.has(flatKey) && (!window || window.start === requestedCycle.period_start)) {
       consumptionByFlat.set(
         flatKey,
         toFiniteNumber(entry.consumption_litres ?? entry.consumption ?? entry.litres ?? entry.volume, 0)
@@ -534,11 +576,17 @@ const applyBillingRecordFallback = ({ billingRecord, flatsByKey, consumptionByFl
   });
 };
 
-const buildPerFlatSummary = ({ flatsByKey, consumptionByFlat, tariffPerKl }) =>
+const buildPerFlatSummary = ({ flatsByKey, consumptionByFlat, tariffPerKl, occupancyWindows }) =>
   getUniqueFlats(flatsByKey)
     .map((flat) => {
       const consumption = Math.round(toFiniteNumber(consumptionByFlat.get(keyFor(flat.flat_id)), 0));
-      const projectedAmount = Math.round((consumption / 1000) * tariffPerKl);
+      const window = occupancyWindows.get(keyFor(flat.flat_id));
+      const effectiveTariff = window?.finalization
+        ? toFiniteNumber(window.finalization.tariffPerKL, tariffPerKl)
+        : tariffPerKl;
+      const projectedAmount = window?.finalization
+        ? toFiniteNumber(window.finalization.water_charge, 0)
+        : Math.round((consumption / 1000) * effectiveTariff);
 
       return {
         flat_id: flat.flat_id,
@@ -549,12 +597,28 @@ const buildPerFlatSummary = ({ flatsByKey, consumptionByFlat, tariffPerKl }) =>
         resident_email: flat.resident_email || "",
         resident_whatsapp: flat.resident_whatsapp || "",
         consumption_litres: consumption,
-        tariff_per_kl: tariffPerKl,
+        tariff_per_kl: effectiveTariff,
         projected_amount: projectedAmount,
+        billing_status: window?.status || "open",
+        billing_period_start: window?.start,
+        billing_period_end: window?.end,
+        finalization_id: window?.finalization?.finalization_id || null,
+        finalization_email_status: window?.finalization?.email_status || null,
       };
     })
-    .filter((entry) => entry.consumption_litres > 0)
+    .filter((entry) => entry.consumption_litres > 0 || entry.billing_status === "finalized")
     .sort((left, right) => left.flat_id.localeCompare(right.flat_id, undefined, { numeric: true }));
+
+const applyFinalizedSnapshots = (consumptionByFlat, occupancyWindows) => {
+  occupancyWindows.forEach((window, flatKey) => {
+    if (window.status === "finalized" && window.finalization) {
+      consumptionByFlat.set(
+        flatKey,
+        toFiniteNumber(window.finalization.consumption_litres, 0)
+      );
+    }
+  });
+};
 
 const buildBillingSummary = ({ requestedCycle, billingCycle, perFlat, finance }) => {
   const totalConsumption = perFlat.reduce((sum, entry) => sum + entry.consumption_litres, 0);
@@ -595,6 +659,11 @@ const buildDemoBillingSummary = (requestedCycle) => {
     userItems: [],
   });
   const deviceToFlat = buildDeviceToFlatMap(flatsByKey);
+  const occupancyWindows = buildOccupancyWindows({
+    flatsByKey,
+    finalizations: [],
+    requestedCycle,
+  });
   const flowRecords = demoApartment.flats.flatMap((flat) =>
     flat.daily_consumption.map((entry) => ({
       apartment_id: demoApartment.apartment_id,
@@ -609,11 +678,13 @@ const buildDemoBillingSummary = (requestedCycle) => {
     flatsByKey,
     deviceToFlat,
     requestedCycle,
+    occupancyWindows,
   });
   const perFlat = buildPerFlatSummary({
     flatsByKey,
     consumptionByFlat,
     tariffPerKl: billingCycle.tariff_per_kl,
+    occupancyWindows,
   });
 
   return buildBillingSummary({
@@ -635,16 +706,22 @@ export const getBillingSummary = async (apartmentId, options = {}) => {
     throw new Error("apartment_id is required");
   }
 
-  const [apartmentItems, deviceItems, userItems, billingRecords] = await Promise.all([
+  const [apartmentItems, deviceItems, userItems, billingRecords, finalizations] = await Promise.all([
     loadApartmentItems(apartmentId),
     loadDeviceItems(apartmentId),
     loadUserItems(apartmentId),
     loadBillingRecords(apartmentId),
+    listFinalizations(apartmentId, requestedCycle.period_start),
   ]);
 
   const flatsByKey = buildFlatMetadata({ apartmentItems, deviceItems, userItems });
   const knownFlatKeys = new Set(flatsByKey.keys());
   const deviceToFlat = buildDeviceToFlatMap(flatsByKey);
+  const occupancyWindows = buildOccupancyWindows({
+    flatsByKey,
+    finalizations,
+    requestedCycle,
+  });
   const flowRecords = await loadFlowRecords(apartmentId, knownFlatKeys, deviceToFlat);
   const billingRecord = selectBillingRecord(billingRecords, requestedCycle);
   const billingCycle = getTariffSource({ billingRecord, apartmentItems, requestedCycle });
@@ -653,14 +730,23 @@ export const getBillingSummary = async (apartmentId, options = {}) => {
     flatsByKey,
     deviceToFlat,
     requestedCycle,
+    occupancyWindows,
   });
 
-  applyBillingRecordFallback({ billingRecord, flatsByKey, consumptionByFlat });
+  applyBillingRecordFallback({
+    billingRecord,
+    flatsByKey,
+    consumptionByFlat,
+    occupancyWindows,
+    requestedCycle,
+  });
+  applyFinalizedSnapshots(consumptionByFlat, occupancyWindows);
 
   const perFlat = buildPerFlatSummary({
     flatsByKey,
     consumptionByFlat,
     tariffPerKl: billingCycle.tariff_per_kl,
+    occupancyWindows,
   });
 
   return buildBillingSummary({

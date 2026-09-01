@@ -96,6 +96,12 @@ export const finalizeTenantBilling = (flatId, apartmentId, cycleId, cutoffDate) 
 export const retryFinalBillEmail = (finalizationId) =>
   billsClient.post(`/bills/finalizations/${finalizationId}/retry-email`);
 
+export const assignFlatOccupancy = (flatId, payload) =>
+  billsClient.post(`/bills/flats/${flatId}/occupancies`, payload);
+
+export const updateFlatOccupancy = (flatId, payload) =>
+  billsClient.patch(`/bills/flats/${flatId}/current-occupancy`, payload);
+
 export const fetchPrepaidOverview = (zoneId) =>
   apiClient.get("/prepaid/overview", { params: { zone_id: zoneId } });
 

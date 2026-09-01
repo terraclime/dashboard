@@ -14,9 +14,27 @@ const getDynamoModule = () => {
 const normalize = (value) => String(value ?? "").trim().toLowerCase();
 const apartmentCycleKey = (apartmentId, cycleId) => `${apartmentId}#${cycleId}`;
 
-export const buildFinalizationId = ({ apartmentId, flatId, cycleId, residentEmail }) => {
-  const identity = [apartmentId, flatId, cycleId, normalize(residentEmail)].join("|");
+export const buildFinalizationId = ({ apartmentId, flatId, cycleId, occupancyId, residentEmail }) => {
+  const identity = [
+    apartmentId,
+    flatId,
+    cycleId,
+    occupancyId || normalize(residentEmail),
+  ].join("|");
   return `fin_${createHash("sha256").update(identity).digest("hex").slice(0, 24)}`;
+};
+
+export const buildFinalizationItem = (snapshot) => {
+  const now = new Date().toISOString();
+  return {
+    ...snapshot,
+    finalization_id: buildFinalizationId(snapshot),
+    apartment_cycle: apartmentCycleKey(snapshot.apartmentId, snapshot.cycleKey || snapshot.cycleId),
+    billing_status: "finalized",
+    email_status: "pending",
+    created_at: now,
+    updated_at: now,
+  };
 };
 
 export async function listFinalizations(apartmentId, cycleId) {
@@ -62,17 +80,8 @@ export async function getFinalization(finalizationId) {
 }
 
 export async function createFinalization(snapshot) {
-  const finalizationId = buildFinalizationId(snapshot);
-  const now = new Date().toISOString();
-  const item = {
-    ...snapshot,
-    finalization_id: finalizationId,
-    apartment_cycle: apartmentCycleKey(snapshot.apartmentId, snapshot.cycleKey || snapshot.cycleId),
-    billing_status: "finalized",
-    email_status: "pending",
-    created_at: now,
-    updated_at: now,
-  };
+  const item = buildFinalizationItem(snapshot);
+  const finalizationId = item.finalization_id;
 
   if (appConfig.demoMode) {
     const existing = demoFinalizations.get(finalizationId);

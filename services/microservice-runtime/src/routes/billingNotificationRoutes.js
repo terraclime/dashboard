@@ -8,6 +8,8 @@ import {
   previewFinalization,
   finalizeTenantBill,
   retryFinalizationEmail,
+  assignFlatOccupancy,
+  correctFlatOccupancy,
 } from "../controllers/billingNotificationController.js";
 
 const router = Router();
@@ -18,6 +20,8 @@ router.post("/send-email", sendBillByEmail);
 router.get("/finalization-preview/:flatId", previewFinalization);
 router.post("/finalize/:flatId", finalizeTenantBill);
 router.post("/finalizations/:finalizationId/retry-email", retryFinalizationEmail);
+router.post("/flats/:flatId/occupancies", assignFlatOccupancy);
+router.patch("/flats/:flatId/current-occupancy", correctFlatOccupancy);
 
 // POST /api/bills/send/:flatId       — send to a single flat
 router.post("/send/:flatId", sendFlatBill);

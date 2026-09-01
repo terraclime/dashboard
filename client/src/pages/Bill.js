@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import SideBar from "../components/SideBar";
 import NavBar from "../components/NavBar";
+import TenantAssignmentModal from "../components/TenantAssignmentModal";
 import {
+  assignFlatOccupancy,
   fetchBillingSummary,
   finalizeTenantBilling,
   previewTenantFinalization,
@@ -21,6 +23,12 @@ const toIsoDate = (date) => date.toISOString().slice(0, 10);
 
 const toLocalIsoDate = (date = new Date()) =>
   [date.getFullYear(), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0")].join("-");
+
+const addIsoDays = (isoDate, days) => {
+  const date = new Date(`${isoDate}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+};
 
 const getBillingCycleId = (billingCycle) => {
   const explicitCycleId = billingCycle?.cycle_id || billingCycle?.cycleId;
@@ -75,6 +83,9 @@ function Bill() {
   const [finalizationSubmitting, setFinalizationSubmitting] = useState(false);
   const [finalizationError, setFinalizationError] = useState("");
   const [finalizationState, setFinalizationState] = useState({});
+  const [assignmentEntry, setAssignmentEntry] = useState(null);
+  const [assignmentSubmitting, setAssignmentSubmitting] = useState(false);
+  const [assignmentError, setAssignmentError] = useState("");
   const cycleId = getBillingCycleId(billing?.billing_cycle);
 
   const handleButtonOpen = () => setButtonOpen(!buttonOpen);
@@ -175,6 +186,35 @@ function Bill() {
     });
   };
 
+  const markFlatVacant = (flatId, finalization) => {
+    setBilling((previous) => {
+      if (!previous) return previous;
+      const updateRows = (rows = []) => rows.map((entry) =>
+        getBillFlatId(entry) === flatId
+          ? {
+              ...entry,
+              resident_name: "",
+              resident_email: "",
+              resident_status: "vacant",
+              occupancy_id: null,
+              occupancy_start_date: null,
+              vacated_at: finalization.periodEnd,
+            }
+          : entry
+      );
+      return {
+        ...previous,
+        per_flat: updateRows(previous.per_flat),
+        per_flat_summary: updateRows(previous.per_flat_summary),
+      };
+    });
+  };
+
+  const openAssignment = (entry, vacatedAt = entry?.vacated_at) => {
+    setAssignmentEntry({ ...entry, vacated_at: vacatedAt });
+    setAssignmentError("");
+  };
+
   const openFinalization = (entry) => {
     const today = toLocalIsoDate();
     const cycleStart = billing?.billing_cycle?.period_start || today;
@@ -201,17 +241,81 @@ function Bill() {
       const apartmentId = localStorage.getItem("apartment_id");
       const response = await finalizeTenantBilling(flatId, apartmentId, cycleId, cutoffDate);
       updateFinalizationState(flatId, response.data.finalization);
+      markFlatVacant(flatId, response.data.finalization);
       closeFinalization(true);
+      openAssignment(finalizationEntry, response.data.finalization.periodEnd);
     } catch (err) {
       const finalization = err?.response?.data?.finalization;
       if (finalization) {
         updateFinalizationState(flatId, finalization);
+        markFlatVacant(flatId, finalization);
+        closeFinalization(true);
+        openAssignment(finalizationEntry, finalization.periodEnd);
+        setBulkResult({
+          type: "error",
+          message: err?.response?.data?.message || "Tenant finalized, but the final email failed. You can retry it from this row.",
+        });
+        return;
       }
       setFinalizationError(
         err?.response?.data?.message || err.message || "Unable to finalize tenant billing."
       );
     } finally {
       setFinalizationSubmitting(false);
+    }
+  };
+
+  const handleAssignTenant = async (form) => {
+    if (!assignmentEntry) return;
+    const flatId = getBillFlatId(assignmentEntry);
+    setAssignmentSubmitting(true);
+    setAssignmentError("");
+    try {
+      const apartmentId = localStorage.getItem("apartment_id");
+      const response = await assignFlatOccupancy(flatId, {
+        apartment_id: apartmentId,
+        ...form,
+      });
+      const occupancy = response.data.occupancy;
+      setBilling((previous) => {
+        if (!previous) return previous;
+        const updateRows = (rows = []) => rows.map((entry) =>
+          getBillFlatId(entry) === flatId
+            ? {
+                ...entry,
+                resident_name: occupancy.resident_name,
+                resident_email: occupancy.resident_email,
+                resident_contact: occupancy.resident_contact,
+                resident_status: occupancy.resident_status,
+                occupancy_id: occupancy.occupancy_id,
+                occupancy_start_date: occupancy.occupancy_start_date,
+                vacated_at: null,
+                consumption_litres: 0,
+                projected_amount: 0,
+                billing_status: "open",
+                finalization_id: null,
+                finalization_email_status: null,
+              }
+            : entry
+        );
+        return {
+          ...previous,
+          per_flat: updateRows(previous.per_flat),
+          per_flat_summary: updateRows(previous.per_flat_summary),
+        };
+      });
+      setFinalizationState((previous) => {
+        const next = { ...previous };
+        delete next[flatId];
+        return next;
+      });
+      setAssignmentEntry(null);
+    } catch (err) {
+      setAssignmentError(
+        err?.response?.data?.message || err.message || "Unable to assign the tenant."
+      );
+    } finally {
+      setAssignmentSubmitting(false);
     }
   };
 
@@ -319,7 +423,10 @@ function Bill() {
     setBulkResult(null);
     try {
       const apartmentId = localStorage.getItem("apartment_id");
-      const flatIds = displayFlats.map(getBillFlatId).filter(Boolean);
+      const flatIds = displayFlats
+        .filter((entry) => entry.resident_status !== "vacant")
+        .map(getBillFlatId)
+        .filter(Boolean);
       const res = await sendBulkBills(cycleId, 5, flatIds, apartmentId);
       setBulkResult({ type: "success", message: res.data.message || "Bulk send started." });
     } catch (err) {
@@ -536,6 +643,7 @@ function Bill() {
                       const sendStatus = flatSendState[flatId];
                       const finalization = finalizationState[flatId];
                       const isFinalized = entry.billing_status === "finalized" || Boolean(finalization);
+                      const isVacant = entry.resident_status === "vacant";
                       const finalEmailStatus = finalization?.email_status || entry.finalization_email_status;
                       return (
                         <tr key={flatId || getDisplayFlatNumber(entry)} className="hover:bg-gray-50">
@@ -543,7 +651,9 @@ function Bill() {
                             {getDisplayFlatNumber(entry)}
                           </td>
                           <td className="px-4 py-3 text-gray-700">
-                            {entry.resident_name}
+                            {isVacant ? (
+                              <span className="rounded-full bg-gray-100 px-2 py-1 text-xs font-medium text-gray-600">Vacant</span>
+                            ) : entry.resident_name}
                           </td>
                           <td className="px-4 py-3 text-right text-gray-900">
                             {entry.consumption_adjusted.toLocaleString()}
@@ -552,7 +662,31 @@ function Bill() {
                             {formatCurrency(entry.projected_amount_adjusted)}
                           </td>
                           <td className="px-4 py-3 text-center">
-                            {isFinalized ? (
+                            {isVacant ? (
+                              <div className="flex flex-col items-center gap-2">
+                                {isFinalized && (
+                                  <span className="text-xs font-medium text-emerald-700">
+                                    Previous tenant finalized through {finalization?.periodEnd || entry.billing_period_end}
+                                  </span>
+                                )}
+                                {finalEmailStatus === "failed" && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRetryFinalEmail(entry)}
+                                    className="text-xs font-medium text-red-600 underline hover:text-red-700"
+                                  >
+                                    Retry final email
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => openAssignment(entry)}
+                                  className="rounded-md bg-[#00A877] px-3 py-1 text-xs font-medium text-white transition hover:bg-[#008f64]"
+                                >
+                                  Assign tenant
+                                </button>
+                              </div>
+                            ) : isFinalized ? (
                               <div className="flex flex-col items-center gap-1">
                                 <span className="text-xs font-medium text-emerald-700">
                                   Finalized through {finalization?.periodEnd || entry.billing_period_end}
@@ -685,6 +819,16 @@ function Bill() {
               </div>
             </div>
           )}
+          <TenantAssignmentModal
+            flatId={assignmentEntry ? getBillFlatId(assignmentEntry) : ""}
+            earliestStart={assignmentEntry?.vacated_at ? addIsoDays(assignmentEntry.vacated_at, 1) : ""}
+            submitting={assignmentSubmitting}
+            error={assignmentError}
+            onClose={() => {
+              if (!assignmentSubmitting) setAssignmentEntry(null);
+            }}
+            onSubmit={handleAssignTenant}
+          />
         </div>
       </div>
     </div>

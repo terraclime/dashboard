@@ -8,6 +8,7 @@ import {
   sumHourlyValues,
   toFiniteNumber,
 } from "./dynamoUtils.service.js";
+import { normalizeOccupancy } from "./occupancy.service.js";
 
 const ACTIVE_WINDOW_HOURS = Number(process.env.REPORT_ACTIVE_WINDOW_HOURS || 24);
 const ACTIVE_WINDOW_MS = ACTIVE_WINDOW_HOURS * 60 * 60 * 1000;
@@ -22,6 +23,9 @@ const FLAT_ID_FIELDS = [
   "unit_id",
   "unitId",
 ];
+
+const CANONICAL_FLAT_ID_FIELDS = ["flat_id", "flatId", "unit_id", "unitId"];
+const FLAT_NUMBER_FIELDS = ["flat_number", "flatNumber", "flat_no", "flatNo"];
 
 const DEVICE_ID_FIELDS = [
   "device_id",
@@ -48,6 +52,12 @@ const normalizeText = (value) => String(value ?? "").trim();
 const keyFor = (value) => normalizeText(value).toLowerCase();
 
 const normalizeFlatId = (source) => normalizeText(getFirstValue(source, FLAT_ID_FIELDS));
+
+const normalizeCanonicalFlatId = (source) =>
+  normalizeText(getFirstValue(source, CANONICAL_FLAT_ID_FIELDS));
+
+const normalizeFlatNumber = (source) =>
+  normalizeText(getFirstValue(source, FLAT_NUMBER_FIELDS));
 
 const normalizeDeviceId = (source) =>
   normalizeText(getFirstValue(source, DEVICE_ID_FIELDS));
@@ -242,9 +252,18 @@ const extractDevices = (source = {}) => {
 
 const mergeFlatRecord = (target, source) => {
   target.block_id ||= source.block_id;
-  target.resident_name ||= source.resident_name;
-  target.resident_email ||= source.resident_email;
-  target.resident_whatsapp ||= source.resident_whatsapp;
+  if (source.occupancy_explicit) {
+    target.resident_status = source.resident_status;
+    target.occupancy_explicit = true;
+    target.occupancy_id = source.occupancy_id;
+    target.occupancy_start_date = source.occupancy_start_date;
+    target.vacated_at = source.vacated_at;
+  }
+  if (target.resident_status !== "vacant") {
+    target.resident_name ||= source.resident_name;
+    target.resident_email ||= source.resident_email;
+    target.resident_whatsapp ||= source.resident_whatsapp;
+  }
 
   const devicesById = new Map(target.devices.map((device) => [device.device_id, device]));
   source.devices.forEach((device) => {
@@ -270,13 +289,24 @@ const normalizeFlatRecord = (source = {}) => {
   if (!flatId) {
     return null;
   }
+  const occupancy = normalizeOccupancy(source);
+  const residentStatus = occupancy.explicit
+    ? occupancy.status
+    : occupancy.residentName || occupancy.residentEmail
+      ? "occupied"
+      : "";
 
   return {
     flat_id: flatId,
     block_id: normalizeBlockId(source, flatId),
-    resident_name: normalizeResidentName(source) || `Flat ${flatId}`,
-    resident_email: normalizeResidentEmail(source),
-    resident_whatsapp: normalizeText(source.resident_whatsapp || source.residentWhatsapp),
+    resident_name: residentStatus === "vacant" ? "" : occupancy.residentName || normalizeResidentName(source),
+    resident_email: residentStatus === "vacant" ? "" : occupancy.residentEmail || normalizeResidentEmail(source),
+    resident_whatsapp: residentStatus === "vacant" ? "" : occupancy.residentContact || normalizeText(source.resident_whatsapp || source.residentWhatsapp),
+    resident_status: residentStatus,
+    occupancy_explicit: occupancy.explicit,
+    occupancy_id: occupancy.occupancyId,
+    occupancy_start_date: occupancy.occupancyStartDate,
+    vacated_at: occupancy.vacatedAt,
     devices: extractDevices(source),
     daily_consumption: normalizeDailyConsumption(source.daily_consumption),
     leak_events: normalizeLeakEvents(source.leak_events),
@@ -325,20 +355,30 @@ const buildApartmentDetailsMap = (items = []) => {
       return;
     }
 
-    const flatKey = keyFor(flatId);
-    const existing = detailsByKey.get(flatKey) || {};
+    const canonicalFlatId = normalizeCanonicalFlatId(source) || flatId;
+    const flatNumber = normalizeFlatNumber(source) || flatId;
+    const aliases = Array.from(new Set([flatId, canonicalFlatId, flatNumber].filter(Boolean)));
+    const existing = aliases.map((alias) => detailsByKey.get(keyFor(alias))).find(Boolean) || {};
     const residentName = normalizeResidentName(source);
     const residentEmail = normalizeResidentEmail(source);
     const residentWhatsapp = normalizeText(
       source.resident_whatsapp || source.residentWhatsapp || source.res_contact || source.resContact
     );
+    const occupancy = normalizeOccupancy(source);
 
-    detailsByKey.set(flatKey, {
+    const details = {
+      bill_flat_id: canonicalFlatId,
+      flat_number: flatNumber,
       block_id: existing.block_id || normalizeBlockId(source, flatId),
       resident_name: residentName || existing.resident_name || "",
       resident_email: residentEmail || existing.resident_email || "",
       resident_whatsapp: residentWhatsapp || existing.resident_whatsapp || "",
-    });
+      resident_status: occupancy.explicit ? occupancy.status : existing.resident_status || "occupied",
+      occupancy_id: occupancy.occupancyId || existing.occupancy_id || "",
+      occupancy_start_date: occupancy.occupancyStartDate || existing.occupancy_start_date || "",
+      vacated_at: occupancy.vacatedAt || existing.vacated_at || "",
+    };
+    aliases.forEach((alias) => detailsByKey.set(keyFor(alias), details));
   };
 
   items.forEach((item) => {
@@ -368,10 +408,16 @@ const enrichFlatsWithApartmentDetails = (flats = [], apartmentItems = []) => {
 
     return {
       ...flat,
+      bill_flat_id: details.bill_flat_id || flat.bill_flat_id || flat.flat_id,
+      flat_number: details.flat_number || flat.flat_number || flat.flat_id,
       block_id: flat.block_id || details.block_id,
-      resident_name: details.resident_name || flat.resident_name,
-      resident_email: details.resident_email || flat.resident_email,
-      resident_whatsapp: details.resident_whatsapp || flat.resident_whatsapp,
+      resident_name: details.resident_status === "vacant" ? "" : details.resident_name || flat.resident_name,
+      resident_email: details.resident_status === "vacant" ? "" : details.resident_email || flat.resident_email,
+      resident_whatsapp: details.resident_status === "vacant" ? "" : details.resident_whatsapp || flat.resident_whatsapp,
+      resident_status: details.resident_status,
+      occupancy_id: details.occupancy_id,
+      occupancy_start_date: details.occupancy_start_date,
+      vacated_at: details.vacated_at,
     };
   });
 };
@@ -680,9 +726,16 @@ export const buildOverviewFromDataset = ({ flats, flowState, now }) => {
 
   const flatDetails = flats.map((flat) => ({
     flat_id: flat.flat_id,
+    bill_flat_id: flat.bill_flat_id || flat.flat_id,
+    flat_number: flat.flat_number || flat.flat_id,
     block_id: flat.block_id || inferBlockFromFlatNumber(flat.flat_id),
-    resident_name: flat.resident_name || `Flat ${flat.flat_id}`,
+    resident_name: flat.resident_status === "vacant" ? "" : flat.resident_name || `Flat ${flat.flat_id}`,
     resident_email: flat.resident_email || "",
+    resident_contact: flat.resident_whatsapp || "",
+    resident_status: flat.resident_status || "occupied",
+    occupancy_id: flat.occupancy_id || null,
+    occupancy_start_date: flat.occupancy_start_date || null,
+    vacated_at: flat.vacated_at || null,
     consumption: flatConsumptionMap[flat.flat_id] || 0,
     active_devices: flatHealthMap[flat.flat_id]?.active || 0,
     total_devices: flatHealthMap[flat.flat_id]?.total || 0,

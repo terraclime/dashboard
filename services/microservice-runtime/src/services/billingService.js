@@ -10,6 +10,7 @@ import {
   toFiniteNumber,
 } from "./dynamoUtils.service.js";
 import { listFinalizations } from "./billingFinalization.service.js";
+import { normalizeOccupancy } from "./occupancy.service.js";
 
 const APARTMENT_ID_FIELDS = ["apartment_id", "apartmentId"];
 const DEVICE_ID_FIELDS = ["device_id", "deviceId", "meter_id", "meterId", "sensor_id", "sensorId"];
@@ -179,6 +180,12 @@ const normalizeFlatRecord = (source = {}) => {
   if (!flatId) {
     return null;
   }
+  const occupancy = normalizeOccupancy(source, normalizeApartmentId(source));
+  const residentStatus = occupancy.explicit
+    ? occupancy.status
+    : occupancy.residentName || occupancy.residentEmail
+      ? "occupied"
+      : "";
 
   return {
     flat_id: flatId,
@@ -187,9 +194,14 @@ const normalizeFlatRecord = (source = {}) => {
     bill_flat_id: explicitFlatId || flatId,
     flat_aliases: uniqueKeys(explicitFlatId, flatNumber),
     block_id: normalizeBlockId(source, flatNumber || flatId),
-    resident_name: normalizeResidentName(source) || `Flat ${flatNumber || flatId}`,
-    resident_email: normalizeResidentEmail(source),
-    resident_whatsapp: normalizeText(source.resident_whatsapp || source.residentWhatsapp || source.res_contact || source.resContact),
+    resident_name: residentStatus === "vacant" ? "" : occupancy.residentName || normalizeResidentName(source),
+    resident_email: residentStatus === "vacant" ? "" : occupancy.residentEmail || normalizeResidentEmail(source),
+    resident_whatsapp: residentStatus === "vacant" ? "" : occupancy.residentContact || normalizeText(source.resident_whatsapp || source.residentWhatsapp || source.res_contact || source.resContact),
+    resident_status: residentStatus,
+    occupancy_explicit: occupancy.explicit,
+    occupancy_id: occupancy.occupancyId,
+    occupancy_start_date: occupancy.occupancyStartDate,
+    vacated_at: occupancy.vacatedAt,
     devices: extractDevices(source),
     daily_consumption: normalizeDailyConsumption(source.daily_consumption),
   };
@@ -206,9 +218,25 @@ const mergeFlatRecord = (target, source) => {
   }
   target.flat_number = target.flat_number || source.flat_number || target.flat_id;
   target.flat_aliases = uniqueKeys(...(target.flat_aliases || []), ...(source.flat_aliases || []), target.flat_id, target.flat_number);
-  target.resident_name = source.resident_name || target.resident_name;
-  target.resident_email = source.resident_email || target.resident_email;
-  target.resident_whatsapp = source.resident_whatsapp || target.resident_whatsapp;
+  if (source.occupancy_explicit) {
+    target.resident_status = source.resident_status;
+    target.occupancy_explicit = true;
+    target.occupancy_id = source.occupancy_id;
+    target.occupancy_start_date = source.occupancy_start_date;
+    target.vacated_at = source.vacated_at;
+  } else if (!target.resident_status && source.resident_status) {
+    target.resident_status = source.resident_status;
+    target.occupancy_id ||= source.occupancy_id;
+  }
+  if (target.resident_status !== "vacant" && (!target.occupancy_explicit || source.occupancy_explicit)) {
+    target.resident_name = source.resident_name || target.resident_name;
+    target.resident_email = source.resident_email || target.resident_email;
+    target.resident_whatsapp = source.resident_whatsapp || target.resident_whatsapp;
+  } else {
+    target.resident_name = "";
+    target.resident_email = "";
+    target.resident_whatsapp = "";
+  }
 
   const devices = new Map(target.devices.map((device) => [device.device_id, device]));
   source.devices.forEach((device) => {
@@ -464,6 +492,11 @@ const ensureFlat = (flatsByKey, flatId, source = {}) => {
     resident_name: normalizeResidentName(source) || `Flat ${normalizeFlatNumber(source) || flatId}`,
     resident_email: normalizeResidentEmail(source),
     resident_whatsapp: "",
+    resident_status: "",
+    occupancy_explicit: false,
+    occupancy_id: "",
+    occupancy_start_date: "",
+    vacated_at: "",
     devices: extractDevices(source),
     daily_consumption: [],
   };
@@ -482,8 +515,26 @@ const buildOccupancyWindows = ({ flatsByKey, finalizations = [], requestedCycle 
       .sort((left, right) => normalizeText(left.periodEnd).localeCompare(normalizeText(right.periodEnd)));
     const matchingResident = [...flatFinalizations]
       .reverse()
-      .find((item) => keyFor(item.residentEmail) === keyFor(flat.resident_email));
+      .find((item) =>
+        item.occupancyId && flat.occupancy_id
+          ? item.occupancyId === flat.occupancy_id
+          : !(
+              flat.occupancy_start_date &&
+              item.periodEnd &&
+              item.periodEnd < flat.occupancy_start_date
+            ) && keyFor(item.residentEmail) === keyFor(flat.resident_email)
+      );
     const latestPrior = flatFinalizations.at(-1);
+
+    if (flat.resident_status === "vacant") {
+      windows.set(keyFor(flat.flat_id), {
+        start: null,
+        end: null,
+        status: "vacant",
+        finalization: latestPrior || null,
+      });
+      return;
+    }
 
     windows.set(keyFor(flat.flat_id), matchingResident
       ? {
@@ -493,9 +544,11 @@ const buildOccupancyWindows = ({ flatsByKey, finalizations = [], requestedCycle 
           finalization: matchingResident,
         }
       : {
-          start: latestPrior
-            ? [requestedCycle.period_start, addDays(latestPrior.periodEnd, 1)].sort().at(-1)
-            : requestedCycle.period_start,
+          start: flat.occupancy_start_date
+            ? [requestedCycle.period_start, flat.occupancy_start_date].sort().at(-1)
+            : latestPrior
+              ? [requestedCycle.period_start, addDays(latestPrior.periodEnd, 1)].sort().at(-1)
+              : requestedCycle.period_start,
           end: requestedCycle.period_end,
           status: "open",
           finalization: null,
@@ -524,7 +577,7 @@ const buildConsumptionByFlat = ({ flowRecords = [], flatsByKey, deviceToFlat, re
       start: requestedCycle.period_start,
       end: requestedCycle.period_end,
     };
-    if (!date || date < window.start || date > window.end) return;
+    if (!window.start || !window.end || !date || date < window.start || date > window.end) return;
     consumptionByFlat.set(summaryKey, (consumptionByFlat.get(summaryKey) || 0) + sumFlowConsumption(record));
   });
 
@@ -538,6 +591,7 @@ const buildConsumptionByFlat = ({ flowRecords = [], flatsByKey, deviceToFlat, re
       start: requestedCycle.period_start,
       end: requestedCycle.period_end,
     };
+    if (!window.start || !window.end) return;
     const fallbackTotal = flat.daily_consumption
       .filter((entry) => entry.date >= window.start && entry.date <= window.end)
       .reduce((sum, entry) => sum + toFiniteNumber(entry.litres, 0), 0);
@@ -567,7 +621,7 @@ const applyBillingRecordFallback = ({ billingRecord, flatsByKey, consumptionByFl
     const flatKey = keyFor(flat.flat_id);
     const window = occupancyWindows.get(flatKey);
 
-    if (!consumptionByFlat.has(flatKey) && (!window || window.start === requestedCycle.period_start)) {
+    if (!consumptionByFlat.has(flatKey) && (!window || (window.status !== "vacant" && window.start === requestedCycle.period_start))) {
       consumptionByFlat.set(
         flatKey,
         toFiniteNumber(entry.consumption_litres ?? entry.consumption ?? entry.litres ?? entry.volume, 0)
@@ -581,10 +635,10 @@ const buildPerFlatSummary = ({ flatsByKey, consumptionByFlat, tariffPerKl, occup
     .map((flat) => {
       const consumption = Math.round(toFiniteNumber(consumptionByFlat.get(keyFor(flat.flat_id)), 0));
       const window = occupancyWindows.get(keyFor(flat.flat_id));
-      const effectiveTariff = window?.finalization
+      const effectiveTariff = window?.status === "finalized"
         ? toFiniteNumber(window.finalization.tariffPerKL, tariffPerKl)
         : tariffPerKl;
-      const projectedAmount = window?.finalization
+      const projectedAmount = window?.status === "finalized"
         ? toFiniteNumber(window.finalization.water_charge, 0)
         : Math.round((consumption / 1000) * effectiveTariff);
 
@@ -593,7 +647,7 @@ const buildPerFlatSummary = ({ flatsByKey, consumptionByFlat, tariffPerKl, occup
         flat_number: flat.flat_number || flat.flat_id,
         bill_flat_id: flat.bill_flat_id || flat.flat_id,
         block_id: flat.block_id || inferBlockFromFlatNumber(flat.flat_number || flat.flat_id) || "-",
-        resident_name: flat.resident_name || `Flat ${flat.flat_number || flat.flat_id}`,
+        resident_name: flat.resident_status === "vacant" ? "" : flat.resident_name || `Flat ${flat.flat_number || flat.flat_id}`,
         resident_email: flat.resident_email || "",
         resident_whatsapp: flat.resident_whatsapp || "",
         consumption_litres: consumption,
@@ -604,9 +658,13 @@ const buildPerFlatSummary = ({ flatsByKey, consumptionByFlat, tariffPerKl, occup
         billing_period_end: window?.end,
         finalization_id: window?.finalization?.finalization_id || null,
         finalization_email_status: window?.finalization?.email_status || null,
+        resident_status: flat.resident_status || "occupied",
+        occupancy_id: flat.occupancy_id || null,
+        occupancy_start_date: flat.occupancy_start_date || null,
+        vacated_at: flat.vacated_at || null,
       };
     })
-    .filter((entry) => entry.consumption_litres > 0 || entry.billing_status === "finalized")
+    .filter((entry) => entry.consumption_litres > 0 || ["finalized", "vacant"].includes(entry.billing_status))
     .sort((left, right) => left.flat_id.localeCompare(right.flat_id, undefined, { numeric: true }));
 
 const applyFinalizedSnapshots = (consumptionByFlat, occupancyWindows) => {

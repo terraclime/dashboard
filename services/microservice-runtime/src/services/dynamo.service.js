@@ -11,6 +11,10 @@ import {
   sumHourlyValues,
   toFiniteNumber,
 } from "./dynamoUtils.service.js";
+import {
+  getDemoOccupancy,
+  normalizeOccupancy,
+} from "./occupancy.service.js";
 
 const DEFAULT_SOCIETY_INFO = {
   legalName: "Residents' Welfare Association",
@@ -644,20 +648,31 @@ const findFlatAcrossApartments = async (flatId, apartmentId) => {
   };
 };
 
-const buildFlatInfo = ({ flat, primaryUser, devices }) => ({
-  flatId: getFlatId(flat),
-  residentName:
-    getResidentName(flat) ||
-    getResidentName(primaryUser) ||
-    [primaryUser?.first_name, primaryUser?.last_name].filter(Boolean).join(" ") ||
-    String(getFlatId(flat)),
-  email: getEmail(flat) || getEmail(primaryUser) || "",
-  block: flat.block_id || flat.blockId || "",
-  flatNo: flat.flat_no || flat.flatNo || getFlatId(flat),
-  inletCount: devices.length || toFiniteNumber(flat.inlet_count || flat.inletCount, 0),
-  installedMeters: devices.length || toFiniteNumber(flat.installed_meters || flat.installedMeters, 0),
-  activeMeters: devices.filter((device) => device.status === "active").length,
-});
+const buildFlatInfo = ({ apartment, flat, primaryUser, devices }) => {
+  const occupancy = normalizeOccupancy(flat, getApartmentId(apartment || flat));
+  const isVacant = occupancy.status === "vacant";
+  return {
+    flatId: getFlatId(flat),
+    residentName: isVacant
+      ? ""
+      : occupancy.residentName ||
+        getResidentName(primaryUser) ||
+        [primaryUser?.first_name, primaryUser?.last_name].filter(Boolean).join(" ") ||
+        String(getFlatId(flat)),
+    email: isVacant ? "" : occupancy.residentEmail || getEmail(primaryUser) || "",
+    residentContact: occupancy.residentContact,
+    residentStatus: occupancy.status,
+    occupancyId: occupancy.occupancyId,
+    persistedOccupancyId: String(flat.occupancy_id || flat.occupancyId || "").trim(),
+    occupancyStartDate: occupancy.occupancyStartDate,
+    vacatedAt: occupancy.vacatedAt,
+    block: flat.block_id || flat.blockId || "",
+    flatNo: flat.flat_no || flat.flatNo || getFlatId(flat),
+    inletCount: devices.length || toFiniteNumber(flat.inlet_count || flat.inletCount, 0),
+    installedMeters: devices.length || toFiniteNumber(flat.installed_meters || flat.installedMeters, 0),
+    activeMeters: devices.filter((device) => device.status === "active").length,
+  };
+};
 
 function demoCycle() {
   const bc = demoApartment.billing_cycle;
@@ -679,16 +694,25 @@ function demoCycle() {
 }
 
 function demoFlats() {
-  return demoApartment.flats.map((f) => ({
+  return demoApartment.flats.map((f) => {
+    const source = getDemoOccupancy(f.flat_id) || f;
+    const occupancy = normalizeOccupancy(source, demoApartment.apartment_id);
+    return {
     flatId: f.flat_id,
-    residentName: f.resident_name,
-    email: f.resident_email,
+    residentName: occupancy.residentName,
+    email: occupancy.residentEmail,
+    residentContact: occupancy.residentContact,
+    residentStatus: occupancy.status,
+    occupancyId: occupancy.occupancyId,
+    persistedOccupancyId: source.occupancy_id || "",
+    occupancyStartDate: occupancy.occupancyStartDate,
+    vacatedAt: occupancy.vacatedAt,
     block: f.block_id,
     flatNo: f.flat_id,
     inletCount: f.devices?.length ?? 5,
     installedMeters: f.devices?.length ?? 5,
     activeMeters: f.devices?.filter((d) => d.status === "active").length ?? 5,
-  }));
+  }});
 }
 
 function demoReadingsForFlat(flat, options = {}) {
@@ -880,24 +904,14 @@ export async function getAllActiveFlats(apartmentId) {
         devices,
       });
     })
-    .filter((flat) => flat.email);
+    .filter((flat) => flat.residentStatus === "occupied" && flat.email);
 }
 
 export async function getFlatById(flatId, apartmentId) {
   if (appConfig.demoMode) {
-    const rawFlat = demoApartment.flats.find((flat) => flat.flat_id === flatId);
-    if (!rawFlat) throw new Error(`Flat ${flatId} not found`);
-
-    return {
-      flatId: rawFlat.flat_id,
-      residentName: rawFlat.resident_name,
-      email: rawFlat.resident_email,
-      block: rawFlat.block_id,
-      flatNo: rawFlat.flat_id,
-      inletCount: rawFlat.devices?.length ?? 5,
-      installedMeters: rawFlat.devices?.length ?? 5,
-      activeMeters: rawFlat.devices?.filter((device) => device.status === "active").length ?? 5,
-    };
+    const flat = demoFlats().find((entry) => entry.flatId === flatId);
+    if (!flat) throw new Error(`Flat ${flatId} not found`);
+    return flat;
   }
 
   const result = await findFlatAcrossApartments(flatId, apartmentId);

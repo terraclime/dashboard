@@ -1,12 +1,24 @@
 import React, { useEffect, useMemo, useState } from "react";
 import SideBar from "../components/SideBar";
 import NavBar from "../components/NavBar";
+import TenantAssignmentModal from "../components/TenantAssignmentModal";
 import { ViewIcon } from "hugeicons-react";
 import { BlockDonutChart, InactiveDevice } from "../components/BlockWiseStats";
-import { fetchReportsOverview } from "../api/endpoints";
+import {
+  assignFlatOccupancy,
+  fetchReportsOverview,
+  updateFlatOccupancy,
+} from "../api/endpoints";
 import { Link } from "react-router-dom";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faPen, faCheck } from "@fortawesome/free-solid-svg-icons";
+
+const addIsoDays = (isoDate, days) => {
+  const date = new Date(`${isoDate}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+};
+
 function Reports() {
   const [buttonOpen, setButtonOpen] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -20,6 +32,9 @@ function Reports() {
   const [residentDirectory, setResidentDirectory] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [editState, setEditState] = useState({});
+  const [assignmentEntry, setAssignmentEntry] = useState(null);
+  const [assignmentSubmitting, setAssignmentSubmitting] = useState(false);
+  const [assignmentError, setAssignmentError] = useState("");
 
   const handleApiReports = async () => {
     try {
@@ -32,14 +47,21 @@ function Reports() {
       setFlatHealthMap(result.data.flatHealthMap || {});
       const directory = (result.data.flatDetails || []).map((entry) => ({
         flat_id: entry.flat_id,
+        bill_flat_id: entry.bill_flat_id || entry.flat_id,
+        flat_number: entry.flat_number || entry.flat_id,
         block_id: entry.block_id,
         resident_name: entry.resident_name,
         resident_email: entry.resident_email || "",
+        resident_contact: entry.resident_contact || "",
+        resident_status: entry.resident_status || "occupied",
+        occupancy_id: entry.occupancy_id || "",
+        occupancy_start_date: entry.occupancy_start_date || "",
+        vacated_at: entry.vacated_at || "",
       }));
       setResidentDirectory(directory);
       setEditState(
         directory.reduce((acc, entry) => {
-          acc[entry.flat_id] = { name: false, email: false };
+          acc[entry.flat_id] = { editing: false, saving: false, error: "" };
           return acc;
         }, {})
       );
@@ -57,23 +79,102 @@ function Reports() {
       )
     );
   };
-  const toggleEditState = (flatId, field) => {
-    setEditState((prev) => {
-      const current = prev[flatId] || { name: false, email: false };
-      return {
-        ...prev,
+  const toggleEditState = async (resident) => {
+    const flatId = resident.flat_id;
+    const billingFlatId = resident.bill_flat_id || flatId;
+    const current = editState[flatId] || {};
+    if (!current.editing) {
+      setEditState((previous) => ({
+        ...previous,
+        [flatId]: { editing: true, saving: false, error: "" },
+      }));
+      return;
+    }
+
+    setEditState((previous) => ({
+      ...previous,
+      [flatId]: { ...previous[flatId], saving: true, error: "" },
+    }));
+    try {
+      const apartmentId = localStorage.getItem("apartment_id");
+      const response = await updateFlatOccupancy(billingFlatId, {
+        apartment_id: apartmentId,
+        occupancy_id: resident.occupancy_id,
+        resident_name: resident.resident_name,
+        resident_email: resident.resident_email,
+        resident_contact: resident.resident_contact,
+      });
+      const occupancy = response.data.occupancy;
+      setResidentDirectory((previous) => previous.map((entry) =>
+        entry.flat_id === flatId
+          ? {
+              ...entry,
+              resident_name: occupancy.resident_name,
+              resident_email: occupancy.resident_email,
+              resident_contact: occupancy.resident_contact,
+              occupancy_id: occupancy.occupancy_id,
+            }
+          : entry
+      ));
+      setEditState((previous) => ({
+        ...previous,
+        [flatId]: { editing: false, saving: false, error: "" },
+      }));
+    } catch (err) {
+      setEditState((previous) => ({
+        ...previous,
         [flatId]: {
-          ...current,
-          [field]: !current[field],
+          ...previous[flatId],
+          saving: false,
+          error: err?.response?.data?.message || err.message || "Unable to save tenant details.",
         },
-      };
-    });
+      }));
+    }
+  };
+
+  const handleAssignTenant = async (form) => {
+    if (!assignmentEntry) return;
+    setAssignmentSubmitting(true);
+    setAssignmentError("");
+    try {
+      const apartmentId = localStorage.getItem("apartment_id");
+      const response = await assignFlatOccupancy(
+        assignmentEntry.bill_flat_id || assignmentEntry.flat_id,
+        {
+        apartment_id: apartmentId,
+        ...form,
+        }
+      );
+      const occupancy = response.data.occupancy;
+      setResidentDirectory((previous) => previous.map((entry) =>
+        entry.flat_id === assignmentEntry.flat_id
+          ? {
+              ...entry,
+              resident_name: occupancy.resident_name,
+              resident_email: occupancy.resident_email,
+              resident_contact: occupancy.resident_contact,
+              resident_status: occupancy.resident_status,
+              occupancy_id: occupancy.occupancy_id,
+              occupancy_start_date: occupancy.occupancy_start_date,
+              vacated_at: "",
+            }
+          : entry
+      ));
+      setAssignmentEntry(null);
+    } catch (err) {
+      setAssignmentError(
+        err?.response?.data?.message || err.message || "Unable to assign the tenant."
+      );
+    } finally {
+      setAssignmentSubmitting(false);
+    }
   };
 
   const filteredDirectory = useMemo(() => {
     if (!searchQuery) return residentDirectory;
     return residentDirectory.filter((entry) =>
-      entry.flat_id.toLowerCase().includes(searchQuery.toLowerCase())
+      [entry.flat_id, entry.flat_number, entry.bill_flat_id]
+        .some((value) => String(value || "").toLowerCase().includes(searchQuery.toLowerCase()))
     );
   }, [residentDirectory, searchQuery]);
   useEffect(() => {
@@ -163,6 +264,7 @@ function Reports() {
                       <th className="px-4 py-3">Flat</th>
                       <th className="px-4 py-3">Resident</th>
                       <th className="px-4 py-3">Email</th>
+                      <th className="px-4 py-3">Contact</th>
                       <th className="px-4 py-3 text-right">Consumption (L)</th>
                       <th className="px-4 py-3 text-right">Active devices</th>
                       <th className="px-4 py-3 text-right">Actions</th>
@@ -179,16 +281,21 @@ function Reports() {
                           active: 0,
                           total: 0,
                         };
-                        const nameEditing = editState[flatId]?.name;
-                        const emailEditing = editState[flatId]?.email;
+                        const isVacant = resident.resident_status === "vacant";
+                        const editing = editState[flatId]?.editing;
+                        const saving = editState[flatId]?.saving;
+                        const editError = editState[flatId]?.error;
                         return (
                           <tr key={flatId} className="hover:bg-gray-50">
                             <td className="px-4 py-3 font-medium text-gray-900">
-                              {flatId}
+                              {resident.flat_number || flatId}
                             </td>
                             <td className="px-4 py-3 text-gray-700">
-                              <div className="flex items-center gap-2">
-                                {nameEditing ? (
+                              {isVacant ? (
+                                <span className="rounded-full bg-gray-100 px-2 py-1 text-xs font-medium text-gray-600">Vacant</span>
+                              ) : (
+                                <div>
+                                  {editing ? (
                                   <input
                                     type="text"
                                     value={resident.resident_name}
@@ -204,18 +311,12 @@ function Reports() {
                                 ) : (
                                   <span>{resident.resident_name}</span>
                                 )}
-                                <button
-                                  type="button"
-                                  className="text-[#00A877] hover:text-[#007151]"
-                                  onClick={() => toggleEditState(flatId, "name")}
-                                >
-                                  <FontAwesomeIcon icon={nameEditing ? faCheck : faPen} />
-                                </button>
-                              </div>
+                                  {editError && <p className="mt-1 max-w-xs text-xs text-red-600">{editError}</p>}
+                                </div>
+                              )}
                             </td>
                             <td className="px-4 py-3 text-gray-500">
-                              <div className="flex items-center gap-2">
-                                {emailEditing ? (
+                              {isVacant ? "-" : editing ? (
                                   <input
                                     type="email"
                                     value={resident.resident_email}
@@ -231,14 +332,18 @@ function Reports() {
                                 ) : (
                                   <span>{resident.resident_email}</span>
                                 )}
-                                <button
-                                  type="button"
-                                  className="text-[#00A877] hover:text-[#007151]"
-                                  onClick={() => toggleEditState(flatId, "email")}
-                                >
-                                  <FontAwesomeIcon icon={emailEditing ? faCheck : faPen} />
-                                </button>
-                              </div>
+                            </td>
+                            <td className="px-4 py-3 text-gray-500">
+                              {isVacant ? "-" : editing ? (
+                                <input
+                                  type="tel"
+                                  value={resident.resident_contact}
+                                  onChange={(event) =>
+                                    handleResidentChange(flatId, "resident_contact", event.target.value)
+                                  }
+                                  className="w-full rounded-lg border border-gray-200 bg-gray-50 py-1 px-2 text-sm focus:border-[#00A877] focus:outline-none focus:ring-1 focus:ring-[#8AE5C1]/50"
+                                />
+                              ) : resident.resident_contact || "-"}
                             </td>
                             <td className="px-4 py-3 text-right text-gray-900">
                               {consumption.toLocaleString()}
@@ -254,13 +359,37 @@ function Reports() {
                               </span>
                             </td>
                             <td className="px-4 py-3 text-right">
-                              <Link
-                                className="inline-flex items-center gap-2 text-[#00A877] hover:text-[#007151] font-medium"
-                                to={`/reports/${flatId}`}
-                              >
-                                <ViewIcon size={18} />
-                                View
-                              </Link>
+                              <div className="flex flex-wrap items-center justify-end gap-3">
+                                {isVacant ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setAssignmentEntry(resident);
+                                      setAssignmentError("");
+                                    }}
+                                    className="rounded-md bg-[#00A877] px-3 py-1 text-xs font-medium text-white hover:bg-[#008f64]"
+                                  >
+                                    Assign tenant
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    disabled={saving}
+                                    className="inline-flex items-center gap-1 text-[#00A877] hover:text-[#007151] disabled:opacity-50"
+                                    onClick={() => toggleEditState(resident)}
+                                  >
+                                    <FontAwesomeIcon icon={editing ? faCheck : faPen} />
+                                    {saving ? "Saving..." : editing ? "Save" : "Edit tenant"}
+                                  </button>
+                                )}
+                                <Link
+                                  className="inline-flex items-center gap-2 text-[#00A877] hover:text-[#007151] font-medium"
+                                  to={`/reports/${flatId}`}
+                                >
+                                  <ViewIcon size={18} />
+                                  View
+                                </Link>
+                              </div>
                             </td>
                           </tr>
                         );
@@ -270,6 +399,16 @@ function Reports() {
               </div>
             </div>
           </section>
+          <TenantAssignmentModal
+            flatId={assignmentEntry?.flat_number || assignmentEntry?.flat_id || ""}
+            earliestStart={assignmentEntry?.vacated_at ? addIsoDays(assignmentEntry.vacated_at, 1) : ""}
+            submitting={assignmentSubmitting}
+            error={assignmentError}
+            onClose={() => {
+              if (!assignmentSubmitting) setAssignmentEntry(null);
+            }}
+            onSubmit={handleAssignTenant}
+          />
         </div>
       </div>
     </div>

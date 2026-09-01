@@ -19,11 +19,15 @@ import {
 
 import { sendBillMail, generateBillHTML } from "../mailer/mailer.js";
 import {
-  createFinalization,
   getFinalization,
   listFinalizations,
   updateFinalizationEmail,
 } from "../services/billingFinalization.service.js";
+import {
+  assignOccupancy,
+  finalizeOccupancy,
+  updateCurrentOccupancy,
+} from "../services/occupancy.service.js";
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -140,6 +144,9 @@ export async function buildFinalizationPreview({ apartmentId, flatId, cycleId, c
     getFlatById(flatId, apartmentId),
     getBillingCycle(cycleId, apartmentId),
   ]);
+  if (flat.residentStatus === "vacant") {
+    throw Object.assign(new Error(`Flat ${flatId} is already vacant`), { statusCode: 409 });
+  }
   if (!flat.email) {
     throw Object.assign(new Error(`Flat ${flatId} has no registered email`), { statusCode: 422 });
   }
@@ -170,6 +177,10 @@ export async function buildFinalizationPreview({ apartmentId, flatId, cycleId, c
     cycleKey: cycle.startDate,
     residentName: flat.residentName,
     residentEmail: flat.email,
+    residentContact: flat.residentContact || "",
+    occupancyId: flat.occupancyId,
+    persistedOccupancyId: flat.persistedOccupancyId || "",
+    occupancyStartDate: flat.occupancyStartDate || "",
     flatNumber: flat.flatNo || flat.flatId,
     block: flat.block || "",
     periodStart,
@@ -182,19 +193,28 @@ export async function buildFinalizationPreview({ apartmentId, flatId, cycleId, c
   };
 }
 
+const finalizationMatchesOccupancy = (item, flat) => {
+  if (item.occupancyId && flat.occupancyId) return item.occupancyId === flat.occupancyId;
+  if (flat.occupancyStartDate && item.periodEnd && item.periodEnd < flat.occupancyStartDate) return false;
+  return normalizeEmail(item.residentEmail) === normalizeEmail(flat.email);
+};
+
 const matchingFinalization = (finalizations, flat) =>
   finalizations.find(
     (item) =>
       String(item.flatId).toLowerCase() === String(flat.flatId).toLowerCase() &&
-      normalizeEmail(item.residentEmail) === normalizeEmail(flat.email)
+      finalizationMatchesOccupancy(item, flat)
   );
 
 const getResidentPeriodStart = (finalizations, flat, cycleStart) => {
+  if (flat.occupancyStartDate) {
+    return [cycleStart, flat.occupancyStartDate].sort().at(-1);
+  }
   const latestOtherResident = finalizations
     .filter(
       (item) =>
         String(item.flatId).toLowerCase() === String(flat.flatId).toLowerCase() &&
-        normalizeEmail(item.residentEmail) !== normalizeEmail(flat.email)
+        !finalizationMatchesOccupancy(item, flat)
     )
     .sort((left, right) => String(left.periodEnd).localeCompare(String(right.periodEnd)))
     .at(-1);
@@ -321,6 +341,9 @@ export async function sendFlatBill(req, res) {
       getFlatById(flatId, apartmentId),
       getBillingCycle(cycleId, apartmentId),
     ]);
+    if (flat.residentStatus === "vacant") {
+      return res.status(409).json({ success: false, message: `Flat ${flatId} is vacant` });
+    }
     const finalizations = await listFinalizations(apartmentId, cycle.startDate);
 
     if (matchingFinalization(finalizations, flat)) {
@@ -366,6 +389,9 @@ export async function sendBillByEmail(req, res) {
 
   try {
     const flat = await getFlatByEmail(email, apartmentId);
+    if (flat.residentStatus === "vacant") {
+      return res.status(409).json({ success: false, message: `Flat ${flat.flatId} is vacant` });
+    }
     const cycle = cycleId
       ? await getBillingCycle(cycleId, apartmentId)
       : await getCurrentBillingCycle(apartmentId);
@@ -409,7 +435,12 @@ export async function previewFinalization(req, res) {
     });
     const existing = matchingFinalization(
       await listFinalizations(apartmentId, preview.cycleKey),
-      { flatId: preview.flatId, email: preview.residentEmail }
+      {
+        flatId: preview.flatId,
+        email: preview.residentEmail,
+        occupancyId: preview.occupancyId,
+        occupancyStartDate: preview.occupancyStartDate,
+      }
     );
     return res.json({ success: true, preview, existing_finalization: existing || null });
   } catch (error) {
@@ -428,7 +459,7 @@ export async function finalizeTenantBill(req, res) {
       cycleId,
       cutoffDate: cutoff_date,
     });
-    const { item, created } = await createFinalization(preview);
+    const { item, created } = await finalizeOccupancy(preview);
 
     if (!created) {
       return res.status(409).json({
@@ -459,6 +490,96 @@ export async function finalizeTenantBill(req, res) {
         message: "Tenant billing was finalized, but the email could not be sent.",
       });
     }
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
+  }
+}
+
+const validateResidentDetails = ({ residentName, residentEmail }) => {
+  if (!String(residentName || "").trim()) {
+    throw Object.assign(new Error("resident_name is required"), { statusCode: 400 });
+  }
+  const email = String(residentEmail || "").trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw Object.assign(new Error("A valid resident_email is required"), { statusCode: 400 });
+  }
+};
+
+export async function assignFlatOccupancy(req, res) {
+  const { flatId } = req.params;
+  const {
+    apartment_id,
+    apartmentId = apartment_id,
+    resident_name,
+    resident_email,
+    resident_contact = "",
+    start_date,
+  } = req.body || {};
+
+  try {
+    if (!apartmentId) throw Object.assign(new Error("apartment_id is required"), { statusCode: 400 });
+    validateResidentDetails({ residentName: resident_name, residentEmail: resident_email });
+    const flat = await getFlatById(flatId, apartmentId);
+    if (flat.residentStatus !== "vacant" || !flat.vacatedAt) {
+      throw Object.assign(new Error("Flat must be vacant before assigning a tenant."), { statusCode: 409 });
+    }
+    const startDate = normalizeDate(start_date);
+    const earliestStart = addDays(flat.vacatedAt, 1);
+    if (!startDate || startDate < earliestStart) {
+      throw Object.assign(
+        new Error(`start_date must be on or after ${earliestStart}`),
+        { statusCode: 422 }
+      );
+    }
+
+    const occupancy = await assignOccupancy({
+      apartmentId,
+      flatId,
+      residentName: String(resident_name).trim(),
+      residentEmail: String(resident_email).trim(),
+      residentContact: String(resident_contact || "").trim(),
+      startDate,
+      expectedVacatedAt: flat.vacatedAt,
+    });
+    return res.status(201).json({ success: true, occupancy, message: `Tenant assigned to flat ${flatId}` });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
+  }
+}
+
+export async function correctFlatOccupancy(req, res) {
+  const { flatId } = req.params;
+  const {
+    apartment_id,
+    apartmentId = apartment_id,
+    occupancy_id,
+    resident_name,
+    resident_email,
+    resident_contact = "",
+  } = req.body || {};
+
+  try {
+    if (!apartmentId) throw Object.assign(new Error("apartment_id is required"), { statusCode: 400 });
+    validateResidentDetails({ residentName: resident_name, residentEmail: resident_email });
+    const flat = await getFlatById(flatId, apartmentId);
+    if (flat.residentStatus !== "occupied") {
+      throw Object.assign(new Error("Flat has no current tenant to update."), { statusCode: 409 });
+    }
+    if (occupancy_id && occupancy_id !== flat.occupancyId) {
+      throw Object.assign(new Error("The current tenant changed. Refresh and try again."), { statusCode: 409 });
+    }
+
+    const occupancy = await updateCurrentOccupancy({
+      apartmentId,
+      flatId,
+      occupancyId: flat.occupancyId,
+      persistedOccupancyId: flat.persistedOccupancyId,
+      expectedEmail: flat.email,
+      residentName: String(resident_name).trim(),
+      residentEmail: String(resident_email).trim(),
+      residentContact: String(resident_contact || "").trim(),
+    });
+    return res.json({ success: true, occupancy, message: `Tenant details updated for flat ${flatId}` });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, message: error.message });
   }

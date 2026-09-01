@@ -28,10 +28,10 @@ Parameters:
     Default: apartment_data
   BillingTable:
     Type: String
-    Default: billing_cycles
+    Default: tariff_configs
   LeaksTable:
     Type: String
-    Default: leak_events
+    Default: leak_data
   CustomDomainName:
     Type: String
     Default: reports.terraclime.com
@@ -80,7 +80,7 @@ Resources:
   ReportsFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: s3://terraclime-data-live-artifacts-717279694116-ap-south-1/terraclime-reports/1fde352af7872e786e3cd2662c4151e8
+      CodeUri: s3://terraclime-data-live-artifacts-717279694116-ap-south-1/terraclime-reports/f4c779428ec53a5cea8891633b8afad9
       Handler: reports-api/src/index.handler
       Policies:
       - Version: '2012-10-17'

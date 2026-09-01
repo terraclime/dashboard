@@ -90,7 +90,7 @@ Resources:
   BillingFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: s3://terraclime-data-live-artifacts-717279694116-ap-south-1/terraclime-billing-api/a2e6d9f9e29a891d0de216807835e6d7
+      CodeUri: s3://terraclime-data-live-artifacts-717279694116-ap-south-1/terraclime-billing-api/eb295afafc4db9c27d9b677ff5c89be0
       Handler: billing-api/src/index.handler
       Policies:
       - Version: '2012-10-17'

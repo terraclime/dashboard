@@ -1,0 +1,67 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Terraclime data-live microservice deployed as a dedicated Lambda.
+
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+  UseDemoData:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+  AwsRegion:
+    Type: String
+    Default: ap-south-1
+  FlowTable:
+    Type: String
+    Default: flow_data
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 15
+    MemorySize: 256
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        NODE_ENV: production
+        USE_DEMO_DATA: !Ref UseDemoData
+        FLOW_TABLE: !Ref FlowTable
+
+Resources:
+  DataLiveApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref StageName
+
+  DataLiveFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: src/handler.handler
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:BatchWriteItem
+                - dynamodb:PutItem
+              Resource:
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${FlowTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${FlowTable}/index/*
+      Events:
+        DataLivePost:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DataLiveApiGateway
+            Path: /api/data-live
+            Method: POST
+
+Outputs:
+  DataLiveEndpoint:
+    Description: POST endpoint for inserting flow_data records.
+    Value: !Sub https://${DataLiveApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/api/data-live

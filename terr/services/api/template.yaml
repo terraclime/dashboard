@@ -1,0 +1,125 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Terraclime API deployed as a Lambda-backed Express application.
+
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+  JwtSecret:
+    Type: String
+    Default: terraclime-demo-secret
+    NoEcho: true
+  UseDemoData:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+  AwsRegion:
+    Type: String
+    Default: ap-south-1
+  UsersTable:
+    Type: String
+    Default: UserCredentials
+  FlowTable:
+    Type: String
+    Default: flow_data
+  DeviceTable:
+    Type: String
+    Default: device_data
+  ApartmentTable:
+    Type: String
+    Default: apartment_data
+  BillingTable:
+    Type: String
+    Default: tariff_configs
+  LeaksTable:
+    Type: String
+    Default: leak_data
+  PrepaidTable:
+    Type: String
+    Default: prepaid_zones
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 30
+    MemorySize: 512
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        NODE_ENV: production
+        USE_DEMO_DATA: !Ref UseDemoData
+        AWS_REGION: !Ref AwsRegion
+        USERS_TABLE: !Ref UsersTable
+        FLOW_TABLE: !Ref FlowTable
+        DEVICE_TABLE: !Ref DeviceTable
+        APARTMENT_TABLE: !Ref ApartmentTable
+        BILLING_TABLE: !Ref BillingTable
+        LEAKS_TABLE: !Ref LeaksTable
+        PREPAID_TABLE: !Ref PrepaidTable
+        JWT_SECRET: !Ref JwtSecret
+
+Resources:
+  TerraclimeApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref StageName
+
+  TerraclimeApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: src/index.handler
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:BatchGetItem
+                - dynamodb:BatchWriteItem
+                - dynamodb:DeleteItem
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:Query
+                - dynamodb:Scan
+                - dynamodb:UpdateItem
+              Resource:
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${UsersTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${UsersTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${FlowTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${FlowTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DeviceTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DeviceTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApartmentTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApartmentTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${BillingTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${BillingTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LeaksTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${LeaksTable}/index/*
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PrepaidTable}
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${PrepaidTable}/index/*
+      Events:
+        RootRoute:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TerraclimeApiGateway
+            Path: /
+            Method: ANY
+        ProxyRoute:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TerraclimeApiGateway
+            Path: /{proxy+}
+            Method: ANY
+
+Outputs:
+  ApiBaseUrl:
+    Description: Base URL for the deployed API Gateway stage.
+    Value: !Sub https://${TerraclimeApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}
+  LiveDataEndpoint:
+    Description: POST endpoint for inserting flow_data records.
+    Value: !Sub https://${TerraclimeApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/api/data-live
+

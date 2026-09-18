@@ -1,0 +1,5 @@
+
+> @terraclime/dashboard-api@0.1.0 start
+> node ../microservice-runtime/dashboard-api/src/index.js
+
+dashboard-api local server listening on http://127.0.0.1:8087

@@ -1,0 +1,15 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "terraclime-dashboard"
+resolve_s3 = false
+s3_bucket = "terraclime-data-live-artifacts-717279694116-ap-south-1"
+s3_prefix = "terraclime-dashboard"
+region = "ap-south-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "StageName=\"prod\" UseDemoData=\"false\" AwsRegion=\"ap-south-1\" FlowTable=\"flow_data\" DeviceTable=\"device_data\" ApartmentTable=\"apartment_data\" TariffTable=\"tariff_configs\" CustomDomainName=\"overview.terraclime.com\" CertificateArn=\"\""
+image_repositories = []
+
+[default.global.parameters]
+region = "ap-south-1"

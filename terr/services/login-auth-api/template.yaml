@@ -1,0 +1,73 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Terraclime login-auth microservice deployed as a dedicated Lambda.
+
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+  AwsRegion:
+    Type: String
+    Default: ap-south-1
+  UsersTable:
+    Type: String
+    Default: UserCredentials
+  JwtSecret:
+    Type: String
+    NoEcho: true
+  JwtTtl:
+    Type: String
+    Default: 2h
+  JwtIssuer:
+    Type: String
+    Default: terraclime-login-auth-api
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 15
+    MemorySize: 256
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        USERS_TABLE: !Ref UsersTable
+        JWT_SECRET: !Ref JwtSecret
+        JWT_TTL: !Ref JwtTtl
+        JWT_ISSUER: !Ref JwtIssuer
+
+Resources:
+  LoginAuthApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref StageName
+      Cors:
+        AllowMethods: "'OPTIONS,POST'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+
+  LoginAuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: src/handler.handler
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource:
+                - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${UsersTable}
+      Events:
+        LoginAuthPost:
+          Type: Api
+          Properties:
+            RestApiId: !Ref LoginAuthApiGateway
+            Path: /api/auth/login
+            Method: POST
+
+Outputs:
+  LoginAuthEndpoint:
+    Description: POST endpoint for user authentication.
+    Value: !Sub https://${LoginAuthApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/api/auth/login
